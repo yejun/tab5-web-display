@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Tab5 clock</title>
+<link rel="stylesheet" href="common.css">
+<style>
+  body { padding: 28px 32px; display: grid; grid-template-columns: 1fr 470px; gap: 20px; }
+  #left { display: flex; flex-direction: column; padding: 34px 40px; }
+  #timebox { display: flex; align-items: flex-end; gap: 14px; }
+  #time { font-size: 210px; font-weight: 200; line-height: .9; letter-spacing: -6px; }
+  #side { display: flex; flex-direction: column; gap: 10px; padding-bottom: 20px; }
+  #sec { font-size: 56px; font-weight: 300; color: var(--accent); line-height: 1; }
+  #period { font-size: 44px; font-weight: 300; color: var(--dim); line-height: 1; }
+  #date { font-size: 38px; margin-top: 22px; }
+  #meta { font-size: 22px; color: var(--dim); margin-top: 8px; }
+  #hint { font-size: 16px; color: var(--faint); margin-top: 6px; }
+  #zones { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: auto; }
+  .zone { background: var(--card2); border-radius: 18px; padding: 16px 20px; }
+  .zone b { display: block; font-size: 18px; font-weight: 500; color: var(--dim); }
+  .zone span { font-size: 34px; font-weight: 300; }
+  .zone i { font-style: normal; font-size: 17px; color: var(--faint); margin-left: 8px; }
+
+  #cal { display: flex; flex-direction: column; }
+  #cal .top { display: flex; align-items: center; justify-content: space-between; }
+  #month { font-size: 30px; font-weight: 500; margin: 26px 0 14px; display: flex; align-items: center; }
+  #month span { flex: 1; }
+  #month button { width: 60px; height: 52px; font-size: 26px; margin-left: 10px; }
+  #grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; text-align: center; }
+  #grid .h { font-size: 16px; color: var(--faint); font-weight: 600; padding-bottom: 6px; }
+  #grid .d { height: 58px; line-height: 58px; border-radius: 14px; font-size: 23px; }
+  #grid .o { color: var(--faint); }
+  #grid .w { color: var(--dim); }
+  #grid .t { background: var(--accent); color: var(--bg); font-weight: 600; }
+  #today { margin-top: auto; height: 56px; font-size: 20px; }
+</style>
+</head>
+<body>
+  <section class="card" id="left">
+    <div id="timebox"><div id="time" class="num">--:--</div><div id="side"><div id="sec" class="num"></div><div id="period"></div></div></div>
+    <div id="date"></div>
+    <div id="meta"></div>
+    <div id="hint">Tap the time to show or hide seconds</div>
+    <div id="zones"></div>
+  </section>
+  <section class="card" id="cal">
+    <div class="top"><span class="label">Calendar</span><a class="home"></a></div>
+    <div id="month"><span></span><button id="prev">‹</button><button id="next">›</button></div>
+    <div id="grid"></div>
+    <button id="today">Back to this month</button>
+  </section>
+
+<script src="common.js"></script>
+<script>
+  // world clocks: --set zones=Europe/London,Asia/Tokyo,...
+  const zones = (TAB5.zones || "Europe/London,Asia/Tokyo,America/New_York").split(",").slice(0, 3);
+  let showSec = false;
+  try { showSec = localStorage.getItem("clock.seconds") === "1"; } catch {}
+
+  function weekNumber(d) {   // ISO 8601
+    const t = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+    t.setUTCDate(t.getUTCDate() + 4 - (t.getUTCDay() || 7));
+    return Math.ceil(((t - Date.UTC(t.getUTCFullYear(), 0, 1)) / 864e5 + 1) / 7);
+  }
+
+  function tickMinute() {
+    const d = new Date();
+    const t = timeParts(d);
+    $("time").textContent = t.hm;
+    $("period").textContent = t.period;
+    $("date").textContent = d.toLocaleDateString([], { weekday: "long", month: "long", day: "numeric", year: "numeric" });
+    const doy = Math.floor((d - new Date(d.getFullYear(), 0, 0)) / 864e5);
+    $("meta").textContent = `Week ${weekNumber(d)} · Day ${doy}`;
+    $("zones").innerHTML = zones.map(z => {
+      const t = timeParts(d, { timeZone: z });
+      const day = d.toLocaleDateString([], { timeZone: z, weekday: "short" });
+      return `<div class="zone"><b>${z.split("/").pop().replace(/_/g, " ")}</b><span class="num">${t.hm}</span><i>${t.period} ${day}</i></div>`;
+    }).join("");
+    if (d.getDate() !== shownToday) { shownToday = d.getDate(); drawCal(); }
+  }
+  let secTimer = null, shownToday = -1;
+  function applySeconds() {
+    clearInterval(secTimer);
+    $("sec").textContent = "";
+    if (showSec) {
+      const s = () => $("sec").textContent = String(new Date().getSeconds()).padStart(2, "0");
+      s(); secTimer = setInterval(s, 1000);
+    }
+  }
+  $("timebox").onclick = () => {
+    showSec = !showSec;
+    try { localStorage.setItem("clock.seconds", showSec ? "1" : "0"); } catch {}
+    applySeconds();
+  };
+
+  // calendar
+  let view = new Date(); view.setDate(1);
+  function drawCal() {
+    const now = new Date(), y = view.getFullYear(), m = view.getMonth();
+    $("month").firstElementChild.textContent = view.toLocaleDateString([], { month: "long", year: "numeric" });
+    const fd = firstDayOfWeek(), first = (new Date(y, m, 1).getDay() - fd + 7) % 7;
+    const days = new Date(y, m + 1, 0).getDate(), prevDays = new Date(y, m, 0).getDate();
+    let html = "";
+    for (let i = 0; i < 7; i++)   // 2023-01-01 was a Sunday
+      html += `<div class="h">${new Date(2023, 0, 1 + (fd + i) % 7).toLocaleDateString([], { weekday: "short" }).slice(0, 2)}</div>`;
+    for (let i = 0; i < 42; i++) {
+      const n = i - first + 1;
+      if (n < 1) html += `<div class="d o">${prevDays + n}</div>`;
+      else if (n > days) html += `<div class="d o">${n - days}</div>`;
+      else {
+        const today = y === now.getFullYear() && m === now.getMonth() && n === now.getDate();
+        const wd = new Date(y, m, n).getDay(), weekend = wd === 0 || wd === 6;
+        html += `<div class="d${today ? " t" : weekend ? " w" : ""}">${n}</div>`;
+      }
+    }
+    $("grid").innerHTML = html;
+  }
+  $("prev").onclick = () => { view.setMonth(view.getMonth() - 1); drawCal(); };
+  $("next").onclick = () => { view.setMonth(view.getMonth() + 1); drawCal(); };
+  $("today").onclick = () => { view = new Date(); view.setDate(1); drawCal(); };
+
+  everyMinute(tickMinute);
+  applySeconds();
+</script>
+</body>
+</html>

@@ -1,0 +1,5 @@
+# Tab5 Web Display server (Python 3.9+)
+playwright>=1.40
+numpy>=1.21
+Pillow>=9.1
+pyserial>=3.5

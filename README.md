@@ -1,0 +1,213 @@
+# Tab5 Web Display
+
+Turn an [M5Stack Tab5](https://docs.m5stack.com/en/core/Tab5) into a touch screen for web pages. A small Python
+server renders a page in headless Chromium on your PC, sends what changed to the Tab5 over WiFi, and passes your
+taps and drags back to the page. Several ready-made apps are included, and you can show any URL or local HTML file.
+
+Version 1.0.0 · MIT licence
+
+![Home launcher on the Tab5](docs/home.png)
+
+| | |
+|---|---|
+| ![Dashboard](docs/dashboard.png) | ![Clock](docs/clock.png) |
+| **Dashboard**: time, weather, 24-hour chart, forecast, air quality, headlines | **Clock**: big clock, calendar, world clocks |
+| ![Sticky notes](docs/notes.png) | ![Editing a note](docs/notes_edit.png) |
+| **Sticky notes**, kept between runs | ...with their own on-screen keyboard |
+
+*All screenshots were read back from the Tab5's frame buffer.*
+
+## Features
+
+- **Any web page with real touch.** Taps, drags, sliders and canvas drawing work, because the page runs in a
+  real browser on the PC.
+- **Fast and light on the Tab5.**
+  - **Only the 16×16 tiles that changed are sent.** An idle page with a ticking clock costs about 1.4 KB a second.
+  - **The Tab5 barely works.** Its hardware JPEG decoder and image processor (PPA) put each update on screen in
+    about 1–2 ms.
+  - **Responsive.** A tap shows its result in about 80–150 ms, and animations run at 15–28 fps.
+- **Built-in apps that need no API keys:** a home launcher, a dashboard, a clock with calendar, sticky notes, a
+  touch demo and a motion test.
+- **Setup on the device.** A settings panel opens on first start to pick a WiFi network with an on-screen keyboard.
+  Later, swipe in from any screen edge to change WiFi, brightness or orientation.
+- **No firewall changes.** The Tab5 listens and the PC connects out to it.
+
+## What you need
+
+- **An M5Stack Tab5.**
+- **A PC on the same network** with Python 3.9 or newer. Tested on Linux; macOS and Windows should work but are
+  untested.
+- **Chromium or Google Chrome.** If neither is installed, Playwright can download its own Chromium.
+- **To build the firmware:** [Arduino CLI](https://arduino.github.io/arduino-cli/).
+
+## Quick start
+
+### 1. Flash the firmware
+
+```sh
+arduino-cli core update-index --additional-urls https://static-cdn.m5stack.com/resource/arduino/package_m5stack_index.json
+arduino-cli core install m5stack:esp32 --additional-urls https://static-cdn.m5stack.com/resource/arduino/package_m5stack_index.json
+arduino-cli lib install M5Unified M5GFX lvgl@9.6.0
+tools/build.sh upload /dev/ttyACM0            # your Tab5's serial port
+```
+
+The build script picks the board options. Tested with M5Stack core 3.3.9, M5Unified 0.2.25, M5GFX 0.2.33 and
+LVGL 9.6.0.
+
+**Check your chip revision.** Tab5 units use two ESP32-P4 chip revisions, and a build for the wrong one does not
+boot. Run `esptool.py --port /dev/ttyACM0 chip_id`:
+- **"revision v1.x":** use the default build.
+- **v3.0 or later:** build with `CHIP=postv3 tools/build.sh upload`.
+
+### 2. Connect the Tab5 to WiFi
+
+On first start the Tab5 shows its settings panel. Pick your network and type the password on the on-screen
+keyboard. The Tab5 then shows its address and the command to run on the PC.
+
+### 3. Start the server on the PC
+
+```sh
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt     # Windows: .venv\Scripts\pip install -r requirements.txt
+.venv/bin/python server/server.py             # the home launcher
+```
+
+**Finding the Tab5:** with the Tab5 plugged in by USB, the server asks it for its address. Otherwise pass
+`--device <ip>`; the address is shown in the Tab5's settings.
+
+**Browser:** if you have neither Chromium nor Chrome, run `.venv/bin/playwright install chromium` once.
+
+## What to show
+
+| command | shows |
+|---|---|
+| `server.py` | **Home**: a launcher for the apps below. Every app has a Home button. |
+| `server.py --app dashboard` | time, current weather, 24-hour chart, 6-day forecast, air quality, Hacker News |
+| `server.py --app clock` | big clock (tap it for seconds), month calendar, three world clocks |
+| `server.py --app notes` | sticky notes with an on-screen keyboard |
+| `server.py --app demo` | touch demo: buttons, switches, sliders, finger paint |
+| `server.py --app motion` | animation test with live frame rate |
+| `server.py --url https://example.com` | any web page |
+| `server.py --file my_page.html` | a local page, reloaded whenever it (or a file next to it) changes |
+
+### App settings
+
+- **Data sources (no API keys):** weather and air quality come from [Open-Meteo](https://open-meteo.com),
+  headlines from the [Hacker News API](https://github.com/HackerNews/API).
+- **Location:** New York unless you set one with `--city Berlin` or `--lat 52.52 --lon 13.40`. With `--city auto`
+  it is guessed from your PC's IP address via [GeoJS](https://www.geojs.io).
+- **Units:** follow the country (°F in the US). `--units metric|imperial` overrides that.
+- **World clocks:** `--set zones=Europe/London,Asia/Tokyo,America/New_York`.
+- **Any other `--set key=value`** reaches the page as `window.TAB5.key`, so your own pages can use it too.
+- **Saved data:** notes and other browser storage live in a browser profile in `~/.local/share/tab5-web-display`.
+  `--profile DIR` uses another one.
+
+### Other options
+
+| option | effect |
+|---|---|
+| `--device IP` | Tab5 address (default: asked over USB) |
+| `--port PORT` | USB serial port (default: found automatically) |
+| `--browser PATH` | Chromium or Chrome executable (default: found on `PATH`) |
+| `--quality N` | JPEG quality, default 88 |
+| `--max-fps N` | cap on updates per second, default 30 |
+| `--show` | also open a visible browser window |
+| `-v` | log every update |
+| `--version` | print the version |
+
+### Making your own pages
+
+- **Size:** design for **1280×720** at a device pixel ratio of 1. The page is shown 1:1.
+- **Edges:** keep buttons more than 40 px from the screen edges. A touch that starts there is held back for up to
+  0.7 s while the Tab5 checks for the settings swipe.
+- **Battery:** mostly static pages are kindest to it. Every change costs a WiFi transfer; changing once a minute
+  is better than once a second.
+- **Examples:** the built-in apps in `server/apps/` are plain HTML, CSS and JavaScript.
+
+## Settings on the Tab5
+
+**Opening the panel:** swipe in from any screen edge, or tap the screen when no page is shown. The panel also opens
+by itself on first start, and whenever the saved network can't be joined.
+
+**What's in it:**
+- **WiFi:**
+  - The scan list is sorted strongest first, with "Other network ..." for hidden networks.
+  - A network is saved only once it connects. If a new one fails, the Tab5 goes back to the previous network.
+- **Status:** the Tab5's address and the server command.
+- **Display:** brightness, and flip 180°. Both are remembered.
+
+**While the panel is open,** the PC connection pauses. After **Done**, the PC reconnects within 2 s and redraws the
+page.
+
+## How it works
+
+```
+PC: server/server.py                                    Tab5: firmware/web_display
+  Chromium (1280x720, touch)                              TCP server, port 8765
+  screencast frame -> diff in 16x16 tiles   --- JPEG -->  hardware JPEG decode -> PPA rotate -> display
+           -> changed rectangles as JPEG                  touch down / move / up
+  touch events in the page                  <-- touch --
+```
+
+**On the PC:**
+- **Frames:** Chromium streams a lossless frame whenever it repaints. The server compares it with what the Tab5
+  shows, groups the changed tiles into rectangles, and encodes each as baseline JPEG with full-resolution colour
+  (4:4:4), so text stays sharp.
+- **Pipelining:** the next frame is prepared while the previous one is still on its way. The Tab5 acknowledges each
+  update once it is on screen, so there is never more than one update in flight.
+
+**On the Tab5:**
+- **Drawing:** each rectangle is decoded by the ESP32-P4's hardware JPEG engine, then rotated into the panel's
+  portrait frame buffer by the PPA. Both use DMA, so the CPU only waits.
+- **Touch:** touches go back to the PC as touch events.
+- **WiFi power save** turns off for 10 s after a touch and while updates stream in, so replies arrive quickly.
+  Otherwise it stays on.
+
+**Measured with `--app motion`:**
+
+| scene | changed area | Tab5 fps | data |
+|---|---|---|---|
+| spinner | ~4% | 22–28 | ~130 KB/s |
+| bouncing balls | 15–20% | 24–27 | ~500 KB/s |
+| full-screen animation | 40–60% | 15–17 | ~600 KB/s |
+
+**Details worth knowing:**
+- **Colour range.** The P4's JPEG decoder expects "TV range" YCbCr (Y 16–235), but JPEG files use the full 0–255
+  range. Decoded as-is, dark greys would be crushed to black, so the server converts to TV range before encoding.
+- **Rendering noise.** Chromium's rasterisation jitters by a few levels between frames, so that is ignored. Once
+  nothing has changed for 0.5 s, an exact cleanup pass sends whatever still differs.
+- **Why not H.264?** The P4 can only decode H.264 in software, at roughly 4 fps for 720p. A mostly static page
+  gains nothing from video compression.
+
+The wire format is described at the top of `firmware/web_display/web_display.ino`.
+
+## Serial commands
+
+USB serial at 115200 baud:
+
+| command | does |
+|---|---|
+| `ip` | print the Tab5's IP address |
+| `wifi <ssid> <password>` | join a network |
+| `panel` | open the settings |
+| `rot` | flip the screen 180° |
+| `forget` | erase all saved settings and restart |
+| `S` | statistics since the last `S` |
+| `T <x> <y>`, `drag <x0> <y0> <x1> <y1> [ms]` | scripted touches, for testing without a finger |
+| `unconfigured` | behave like a first start until the next reboot |
+| `F` | dump the frame buffer; `tools/shot.py out.png` saves it as a PNG |
+
+## Troubleshooting
+
+- **"No Tab5 found on USB":** pass `--device <ip>`. The address is in the Tab5's settings (swipe in from an
+  edge).
+- **The Tab5 says "Waiting for the PC" but nothing appears:**
+  - The PC and the Tab5 must be able to reach each other: same network, or routed.
+  - Check that the server prints `showing on Tab5`.
+- **The screen stays black after flashing:** the build doesn't match your chip revision. See
+  [Flash the firmware](#1-flash-the-firmware).
+- **Chromium not found:** run `.venv/bin/playwright install chromium`, or pass `--browser /path/to/chrome`.
+
+## Licence
+
+[MIT](LICENSE) © 2026 Yejun Yang

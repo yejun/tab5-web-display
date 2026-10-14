@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Tab5 motion</title>
+<style>
+  :root { --bg: #11141c; --card: #1a1f2b; --line: #2a3142; --ink: #e8e4da; --dim: #8b93a7;
+          --accent: hsl(168, 70%, 62%); --accent-soft: hsl(168, 45%, 24%); }
+  * { box-sizing: border-box; margin: 0; -webkit-tap-highlight-color: transparent; user-select: none; }
+  html, body { width: 1280px; height: 720px; overflow: hidden; background: var(--bg); color: var(--ink);
+               font: 22px/1.3 "Inter", "Noto Sans", "DejaVu Sans", sans-serif; }
+  #bg { position: fixed; inset: 0; z-index: 0; }
+  main { position: relative; z-index: 1; display: grid; grid-template-columns: 280px 1fr; gap: 20px;
+         padding: 24px 28px; height: 100%; }
+  aside { display: flex; flex-direction: column; gap: 12px; }
+  h1 { font-size: 30px; font-weight: 600; margin-bottom: 6px; }
+  a.back { color: var(--dim); text-decoration: none; font-size: 20px; }
+  button { font: inherit; font-size: 24px; color: var(--ink); background: rgba(26, 31, 43, .85);
+           border: 1px solid var(--line); border-radius: 16px; height: 64px; text-align: left; padding: 0 20px; }
+  button.on { background: var(--accent-soft); border-color: var(--accent); }
+  button:active { background: var(--accent); color: var(--bg); }
+  button small { display: block; font-size: 15px; color: var(--dim); margin-top: -4px; }
+  button.on small { color: var(--ink); opacity: .7; }
+  #stats { margin-top: auto; background: rgba(26, 31, 43, .85); border: 1px solid var(--line); border-radius: 16px;
+           padding: 14px 18px; font-size: 18px; color: var(--dim); font-variant-numeric: tabular-nums; }
+  #stats div { display: flex; justify-content: space-between; align-items: baseline; }
+  #stats b { color: var(--ink); font-weight: 500; }
+  #stats .big b { color: var(--accent); font-size: 30px; line-height: 1; }
+  #stage { position: relative; border-radius: 22px; border: 1px solid var(--line); background: rgba(12, 15, 21, .6);
+           overflow: hidden; touch-action: none; }
+  #stage canvas { position: absolute; inset: 0; }
+  #hint { position: absolute; left: 24px; bottom: 18px; color: var(--dim); font-size: 18px; }
+
+  /* "Spinner": small CSS animations only */
+  #spin { position: absolute; inset: 0; display: none; place-items: center; }
+  .ring { width: 150px; height: 150px; border-radius: 50%; border: 14px solid #2b3242;
+          border-top-color: var(--accent); animation: turn 1s linear infinite; }
+  .bar { position: absolute; top: calc(50% + 120px); width: 360px; height: 10px; border-radius: 5px; background: #2b3242;
+         overflow: hidden; }
+  .bar::after { content: ""; position: absolute; inset: 0; width: 30%; background: var(--accent); border-radius: 5px;
+                animation: slide 1.6s ease-in-out infinite; }
+  @keyframes turn { to { transform: rotate(360deg); } }
+  @keyframes slide { from { left: -30%; } to { left: 100%; } }
+</style>
+</head>
+<body>
+<canvas id="bg" width="1280" height="720"></canvas>
+<main>
+  <aside>
+    <h1>Motion test</h1>
+    <a class="back" href="home.html">⌂ Home</a>
+    <button data-scene="spin">Spinner<small>small area · ~4% of screen</small></button>
+    <button data-scene="balls">Bouncing balls<small>scattered · ~10–40%</small></button>
+    <button data-scene="follow">Follow finger<small>drag in the panel</small></button>
+    <button data-scene="full">Full screen<small>aurora · 100%</small></button>
+    <button data-scene="none">Stop<small>static · nothing sent</small></button>
+    <div id="stats">
+      <div class="big">Tab5 frames/s <b id="s-fps">–</b></div>
+      <div>Chromium frames/s <b id="s-page">–</b></div>
+      <div>Data <b id="s-kb">–</b></div>
+      <div>Area per frame <b id="s-area">–</b></div>
+      <div>Capture + encode <b id="s-ms">–</b></div>
+    </div>
+  </aside>
+  <section id="stage">
+    <div id="spin"><div class="ring"></div><div class="bar"></div></div>
+    <canvas id="cv"></canvas>
+    <div id="hint"></div>
+  </section>
+</main>
+<script>
+  const $ = id => document.getElementById(id);
+  const stage = $("stage"), cv = $("cv"), cx = cv.getContext("2d"), bg = $("bg"), bx = bg.getContext("2d");
+  cv.width = stage.clientWidth; cv.height = stage.clientHeight;
+  const SW = cv.width, SH = cv.height;
+  const hints = { spin: "CSS animations: a ring and a progress bar",
+                  balls: "8 balls on a canvas, moving at constant speed (time-based, so dropped frames skip ahead)",
+                  follow: "the ring follows your finger; the dot orbits at a fixed 0.5 turns/s for reference",
+                  full: "every pixel changes every frame - the worst case", none: "" };
+  let scene = "none";
+
+  // server stats (pushed once a second by server.py)
+  window.tab5Stats = s => {
+    $("s-fps").textContent = s.fps.toFixed(1);
+    $("s-kb").textContent = s.kbps < 1 ? "0 KB/s" : Math.round(s.kbps) + " KB/s";
+    $("s-area").textContent = s.fps ? s.area.toFixed(0) + "%" : "–";
+    $("s-ms").textContent = s.fps ? Math.round(s.capture) + " + " + Math.round(s.encode) + " ms" : "–";
+  };
+
+  // balls: positions are a pure function of time, so speed is the same however often frames are taken
+  const balls = Array.from({ length: 8 }, (_, i) => ({
+    r: 26 + (i * 7) % 22, vx: 160 + i * 37, vy: 120 + ((i * 53) % 140), px: i * 211, py: i * 97,
+    hue: (168 + i * 45) % 360 }));
+  const bounce = (p, len) => { const m = p % (2 * len); return m < len ? m : 2 * len - m; };
+
+  let finger = null, ring = { x: SW / 2, y: SH / 2 };
+  stage.addEventListener("pointerdown", e => { finger = [e.offsetX, e.offsetY]; });
+  stage.addEventListener("pointermove", e => { if (finger) finger = [e.offsetX, e.offsetY]; });
+  addEventListener("pointerup", () => { finger = null; });
+
+  let frames = 0;
+  setInterval(() => { $("s-page").textContent = scene === "none" || scene === "spin" ? "–" : frames; frames = 0; }, 1000);
+
+  function draw(t) {
+    requestAnimationFrame(draw);
+    if (scene === "none" || scene === "spin") return;
+    frames++;
+    const s = t / 1000;
+    cx.clearRect(0, 0, SW, SH);
+    if (scene === "balls") {
+      for (const b of balls) {
+        const x = b.r + bounce(b.px + b.vx * s, SW - 2 * b.r), y = b.r + bounce(b.py + b.vy * s, SH - 2 * b.r);
+        cx.fillStyle = `hsl(${b.hue},70%,62%)`;
+        cx.beginPath(); cx.arc(x, y, b.r, 0, 7); cx.fill();
+      }
+    } else if (scene === "follow") {
+      const a = s * Math.PI;   // 0.5 turns per second
+      cx.fillStyle = "#8b93a7";
+      cx.beginPath(); cx.arc(SW / 2 + 220 * Math.cos(a), SH / 2 + 220 * Math.sin(a), 14, 0, 7); cx.fill();
+      if (finger) { ring.x = finger[0]; ring.y = finger[1]; }
+      cx.strokeStyle = "hsl(168,70%,62%)"; cx.lineWidth = 10;
+      cx.beginPath(); cx.arc(ring.x, ring.y, 46, 0, 7); cx.stroke();
+    } else if (scene === "full") {
+      const g = bx.createLinearGradient(0, 0, 1280, 720);
+      g.addColorStop(0, `hsl(${(200 + 40 * Math.sin(s * .7)) | 0},55%,14%)`);
+      g.addColorStop(1, `hsl(${(280 + 40 * Math.sin(s * .5)) | 0},55%,12%)`);
+      bx.fillStyle = g; bx.fillRect(0, 0, 1280, 720);
+      for (let k = 0; k < 3; k++) {   // three aurora ribbons
+        bx.beginPath();
+        for (let x = 0; x <= 1280; x += 20) {
+          const y = 300 + 90 * Math.sin(x / 210 + s * (0.9 + k * 0.3) + k * 2) + 40 * Math.sin(x / 80 - s * 1.7 + k);
+          x ? bx.lineTo(x, y) : bx.moveTo(x, y);
+        }
+        bx.lineTo(1280, 720); bx.lineTo(0, 720); bx.closePath();
+        bx.fillStyle = `hsla(${150 + k * 40},70%,60%,0.18)`; bx.fill();
+      }
+    }
+  }
+  requestAnimationFrame(draw);
+
+  function setScene(name) {
+    scene = name;
+    document.querySelectorAll("button[data-scene]").forEach(b => b.classList.toggle("on", b.dataset.scene === name));
+    $("spin").style.display = name === "spin" ? "grid" : "none";
+    $("hint").textContent = hints[name];
+    cx.clearRect(0, 0, SW, SH);
+    if (name !== "full") bx.clearRect(0, 0, 1280, 720);
+  }
+  document.querySelectorAll("button[data-scene]").forEach(b => b.onclick = () => setScene(b.dataset.scene));
+  setScene(new URLSearchParams(location.search).get("scene") || "balls");
+</script>
+</body>
+</html>

@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Tab5 home</title>
+<link rel="stylesheet" href="common.css">
+<style>
+  body { padding: 56px 64px; display: flex; flex-direction: column; gap: 36px; }
+  header { display: flex; align-items: baseline; gap: 24px; }
+  #time { font-size: 64px; font-weight: 300; line-height: 1; }
+  #date { font-size: 26px; color: var(--dim); }
+  #hello { margin-left: auto; font-size: 24px; color: var(--dim); }
+  main { display: grid; grid-template-columns: repeat(3, 1fr); grid-auto-rows: 228px; gap: 24px; flex: 1; }
+  a.tile { display: flex; flex-direction: column; justify-content: flex-end; gap: 6px; padding: 26px 28px;
+           border-radius: 26px; background: var(--card); border: 1px solid var(--line); color: var(--ink);
+           text-decoration: none; position: relative; overflow: hidden; }
+  a.tile:active { background: var(--card2); border-color: var(--c); }
+  a.tile b { font-size: 32px; font-weight: 600; }
+  a.tile span { font-size: 19px; color: var(--dim); }
+  a.tile svg { position: absolute; top: 24px; left: 26px; width: 64px; height: 64px; }
+  .own { display: flex; flex-direction: column; justify-content: center; gap: 10px; padding: 26px 28px;
+         border-radius: 26px; border: 1px dashed var(--line); }
+  .own b { font-size: 26px; font-weight: 600; color: var(--dim); }
+  .own span { font-size: 18px; color: var(--faint); line-height: 1.6; }
+  .own code { font: 17px "DejaVu Sans Mono", monospace; color: var(--dim); }
+  a.tile::after { content: ""; position: absolute; right: -60px; top: -60px; width: 200px; height: 200px;
+                  border-radius: 50%; background: var(--c); opacity: .10; }
+</style>
+</head>
+<body>
+  <header><div id="time" class="num"></div><div id="date"></div><div id="hello"></div></header>
+  <main>
+    <a class="tile" href="dashboard.html" style="--c: var(--sky)">
+      <svg viewBox="0 0 64 64" fill="none" stroke="var(--sky)" stroke-width="4" stroke-linecap="round">
+        <rect x="6" y="10" width="52" height="44" rx="8"/><path d="M16 42l10-12 8 8 14-16"/></svg>
+      <b>Dashboard</b><span>Time, weather, air quality, headlines</span></a>
+    <a class="tile" href="clock.html" style="--c: var(--accent)">
+      <svg viewBox="0 0 64 64" fill="none" stroke="var(--accent)" stroke-width="4" stroke-linecap="round">
+        <circle cx="32" cy="32" r="25"/><path d="M32 17v15l10 7"/></svg>
+      <b>Clock</b><span>Big clock, calendar, world time</span></a>
+    <a class="tile" href="notes.html" style="--c: var(--sun)">
+      <svg viewBox="0 0 64 64" fill="none" stroke="var(--sun)" stroke-width="4" stroke-linejoin="round">
+        <path d="M10 8h44v32L38 56H10z"/><path d="M38 56V40h16"/><path d="M20 22h24M20 32h14" stroke-linecap="round"/></svg>
+      <b>Sticky notes</b><span>Quick notes, kept between runs</span></a>
+    <a class="tile" href="demo.html" style="--c: var(--rose)">
+      <svg viewBox="0 0 64 64" fill="none" stroke="var(--rose)" stroke-width="4" stroke-linecap="round">
+        <rect x="8" y="14" width="48" height="36" rx="18"/><circle cx="40" cy="32" r="10" fill="var(--rose)"/></svg>
+      <b>Touch demo</b><span>Buttons, switches, sliders, paint</span></a>
+    <a class="tile" href="motion.html" style="--c: var(--violet)">
+      <svg viewBox="0 0 64 64" fill="none" stroke="var(--violet)" stroke-width="4" stroke-linecap="round">
+        <circle cx="22" cy="40" r="10"/><path d="M36 26l16-14M30 18l10-8M42 34l12-6"/></svg>
+      <b>Motion test</b><span>How animation feels on the Tab5</span></a>
+    <div class="tile own">
+      <b>Your own page</b>
+      <span>On the PC:<br><code>server.py --url https://…</code><br><code>server.py --file page.html</code></span></div>
+  </main>
+<script src="common.js"></script>
+<script>
+  everyMinute(() => {
+    const d = new Date();
+    $("time").textContent = fmtTime(d);
+    $("date").textContent = d.toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" });
+    const h = d.getHours();
+    $("hello").textContent = h < 5 ? "Good night" : h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening";
+  });
+</script>
+</body>
+</html>

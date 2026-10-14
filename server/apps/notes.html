@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Tab5 notes</title>
+<link rel="stylesheet" href="common.css">
+<style>
+  body { padding: 28px 32px; display: flex; flex-direction: column; gap: 18px; }
+  header { display: flex; align-items: center; gap: 18px; }
+  header h1 { font-size: 32px; font-weight: 600; }
+  header .dim { font-size: 20px; }
+  header .sp { flex: 1; }
+  #add { height: 52px; padding: 0 22px; font-size: 20px; background: var(--accent-soft); }
+  #board { flex: 1; display: grid; grid-template-columns: repeat(4, 1fr); grid-template-rows: repeat(3, 1fr); gap: 16px; }
+  .note { border-radius: 18px; padding: 16px 18px; color: #15181f; display: flex; flex-direction: column;
+          overflow: hidden; box-shadow: 0 6px 16px rgba(0, 0, 0, .25); }
+  .note:active { transform: scale(.97); }
+  .note p { font-size: 22px; line-height: 1.3; white-space: pre-wrap; overflow: hidden; flex: 1; word-break: break-word; }
+  .note small { font-size: 15px; opacity: .6; margin-top: 6px; }
+  .empty { grid-column: 1 / -1; grid-row: 1 / -1; display: grid; place-items: center; color: var(--faint); font-size: 26px; }
+
+  /* editor */
+  #ed { position: fixed; inset: 0; background: rgba(0, 0, 0, .72); display: none; }
+  #ed.open { display: block; }
+  #paper { position: absolute; left: 160px; top: 22px; width: 960px; height: 360px; border-radius: 22px; padding: 18px 22px;
+           display: flex; flex-direction: column; gap: 12px; color: #15181f; }
+  #text { flex: 1; resize: none; border: 0; outline: 0; background: transparent; font-family: inherit; font-size: 28px; line-height: 1.35;
+          color: inherit; user-select: text; }
+  #tools { display: flex; align-items: center; gap: 12px; }
+  .sw { width: 44px; height: 44px; border-radius: 50%; border: 3px solid rgba(0, 0, 0, .15); }
+  .sw.on { border-color: #15181f; }
+  #tools .sp { flex: 1; }
+  #tools button { height: 50px; padding: 0 20px; font-size: 20px; }
+  #del { background: transparent; color: #15181f; border-color: rgba(0, 0, 0, .3); }
+  #done { background: #15181f; color: var(--ink); }
+
+  /* on-screen keyboard (the page runs in Chromium on the PC, so it brings its own) */
+  #kb { position: absolute; left: 0; right: 0; bottom: 0; height: 306px; background: #0c0f15; padding: 10px;
+        display: grid; grid-template-rows: repeat(4, 1fr); gap: 8px; }
+  .row { display: flex; gap: 8px; }
+  .k { flex: 1; display: grid; place-items: center; background: var(--card2); border-radius: 12px; font-size: 28px; }
+  .k:active, .k.down { background: var(--accent); color: var(--bg); }
+  .k.fn { background: var(--line); font-size: 22px; }
+  .k.w15 { flex: 1.5; } .k.w2 { flex: 2; } .k.w5 { flex: 5.5; }
+  .k.lit { background: var(--accent-soft); }
+</style>
+</head>
+<body>
+  <header><h1>Sticky notes</h1><span class="dim" id="count"></span><span class="sp"></span>
+    <button id="add">+ New note</button><a class="home"></a></header>
+  <main id="board"></main>
+
+  <div id="ed">
+    <div id="paper">
+      <textarea id="text" spellcheck="false"></textarea>
+      <div id="tools"><span id="swatches" style="display:flex;gap:10px"></span><span class="sp"></span>
+        <button id="del">Delete</button><button id="done">Done</button></div>
+    </div>
+    <div id="kb"></div>
+  </div>
+
+<script src="common.js"></script>
+<script>
+  const COLORS = ["#f2d77a", "#f4a9b8", "#9fcdf5", "#8fe3cf", "#c8b6f5", "#f5bf8e"];
+  const MAX = 12;
+  let notes = [];
+  try { notes = JSON.parse(localStorage.getItem("notes") || "null"); } catch {}
+  if (!Array.isArray(notes)) notes = [];
+  const save = () => { try { localStorage.setItem("notes", JSON.stringify(notes)); } catch {} };
+  const esc = s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+
+  function draw() {
+    $("count").textContent = `${notes.length} of ${MAX}`;
+    $("add").style.visibility = notes.length < MAX ? "visible" : "hidden";
+    $("board").innerHTML = notes.length ? notes.map((n, i) =>
+      `<div class="note" data-i="${i}" style="background:${COLORS[n.color]}"><p>${esc(n.text) || "<i style='opacity:.5'>Empty note</i>"}</p>
+       <small>${new Date(n.t).toLocaleDateString([], { month: "short", day: "numeric" })}</small></div>`).join("")
+      : `<div class="empty">No notes yet. Tap “+ New note” to write one.</div>`;
+    document.querySelectorAll(".note").forEach(el => el.onclick = () => edit(+el.dataset.i));
+  }
+
+  // ---- editor ----
+  let cur = -1;
+  function edit(i) {
+    cur = i;
+    $("text").value = notes[i].text;
+    paint();
+    $("ed").classList.add("open");
+    const ta = $("text");
+    ta.focus();
+    ta.setSelectionRange(ta.value.length, ta.value.length);
+  }
+  function paint() {
+    $("paper").style.background = COLORS[notes[cur].color];
+    $("swatches").innerHTML = COLORS.map((c, i) => `<div class="sw${i === notes[cur].color ? " on" : ""}" data-c="${i}" style="background:${c}"></div>`).join("");
+    document.querySelectorAll(".sw").forEach(s => s.onclick = () => { notes[cur].color = +s.dataset.c; paint(); });
+  }
+  function close() {
+    notes[cur].text = $("text").value;
+    if (!notes[cur].text.trim()) notes.splice(cur, 1);   // an emptied note isn't kept
+    else notes[cur].t = Date.now();
+    save(); draw();
+    $("ed").classList.remove("open");
+  }
+  $("done").onclick = close;
+  $("del").onclick = () => { notes.splice(cur, 1); save(); draw(); $("ed").classList.remove("open"); };
+  $("add").onclick = () => {
+    if (notes.length >= MAX) return;
+    notes.unshift({ text: "", color: notes.length % COLORS.length, t: Date.now() });
+    draw(); edit(0);
+  };
+
+  // ---- keyboard ----
+  const LAYOUTS = {
+    abc: ["q w e r t y u i o p ⌫", "a s d f g h j k l ↵", "⇧ z x c v b n m , . ?", "123 space ✓"],
+    "123": ["1 2 3 4 5 6 7 8 9 0 ⌫", "@ # & * ( ) - + = / ↵", "abc ! ' \" : ; % _ ~ €", "abc space ✓"],
+  };
+  let layout = "abc", shift = false;
+  function drawKb() {
+    $("kb").innerHTML = LAYOUTS[layout].map(r => `<div class="row">${r.split(" ").map(k => {
+      const fn = ["⌫", "↵", "⇧", "123", "abc", "✓"].includes(k);
+      const w = k === "space" ? " w5" : k === "⇧" || k === "⌫" ? " w15" : k === "123" || k === "abc" || k === "✓" ? " w2" : "";
+      const label = k === "space" ? "" : shift && k.length === 1 ? k.toUpperCase() : k;
+      return `<div class="k${fn ? " fn" : ""}${w}${k === "⇧" && shift ? " lit" : ""}" data-k="${k}">${label}</div>`;
+    }).join("")}</div>`).join("");
+  }
+  function type(s) {
+    const ta = $("text");
+    ta.setRangeText(s, ta.selectionStart, ta.selectionEnd, "end");
+  }
+  // pointerdown so fast typing doesn't wait for a click; preventDefault keeps the textarea's caret and focus
+  $("kb").addEventListener("pointerdown", e => {
+    const el = e.target.closest(".k");
+    if (!el) return;
+    e.preventDefault();
+    const k = el.dataset.k, ta = $("text");
+    if (k === "⌫") {
+      if (ta.selectionStart !== ta.selectionEnd) type("");
+      else if (ta.selectionStart > 0) ta.setRangeText("", ta.selectionStart - 1, ta.selectionStart, "end");
+    } else if (k === "↵") type("\n");
+    else if (k === "space") type(" ");
+    else if (k === "⇧") { shift = !shift; drawKb(); return; }
+    else if (k === "123" || k === "abc") { layout = k; shift = false; drawKb(); return; }
+    else if (k === "✓") { close(); return; }
+    else { type(shift ? k.toUpperCase() : k); if (shift) { shift = false; drawKb(); return; } }
+    ta.focus();
+  });
+  drawKb();
+  draw();
+</script>
+</body>
+</html>

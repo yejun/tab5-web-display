@@ -1,0 +1,22 @@
+/* Shared look for the built-in apps: 1280x720, dark, vivid-but-calm accents. */
+:root {
+  --bg: #11141c; --card: #1a1f2b; --card2: #212736; --line: #2a3142; --ink: #e8e4da; --dim: #8b93a7; --faint: #5b6377;
+  --accent: hsl(168, 70%, 62%); --accent-soft: hsl(168, 45%, 24%);
+  --warm: #f0a868; --rose: #ef8fa4; --sky: #7fb8f0; --sun: #f2cf6b; --violet: #b49cf0;
+}
+* { box-sizing: border-box; margin: 0; -webkit-tap-highlight-color: transparent; user-select: none; }
+html, body { width: 1280px; height: 720px; overflow: hidden; background: var(--bg); color: var(--ink);
+             font: 22px/1.3 "Inter", "Noto Sans", "DejaVu Sans", sans-serif; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 22px; padding: 20px 24px; }
+.label { font-size: 16px; font-weight: 600; color: var(--dim); text-transform: uppercase; letter-spacing: 2px; }
+.num { font-variant-numeric: tabular-nums; }
+.dim { color: var(--dim); }
+
+/* Home button: kept 48 px away from the screen edges, where the Tab5 listens for its settings swipe */
+a.home { display: inline-flex; align-items: center; gap: 10px; height: 52px; padding: 0 20px 0 16px;
+         border-radius: 16px; background: var(--card); border: 1px solid var(--line); color: var(--ink);
+         text-decoration: none; font-size: 20px; }
+a.home:active { background: var(--accent); color: var(--bg); }
+a.home svg { width: 24px; height: 24px; }
+button { font: inherit; color: var(--ink); background: var(--card2); border: 1px solid var(--line); border-radius: 16px; }
+button:active { background: var(--accent); color: var(--bg); }
