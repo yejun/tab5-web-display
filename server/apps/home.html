@@ -23,6 +23,11 @@
   .own b { font-size: 26px; font-weight: 600; color: var(--dim); }
   .own span { font-size: 18px; color: var(--faint); line-height: 1.6; }
   .own code { font: 17px "DejaVu Sans Mono", monospace; color: var(--dim); }
+  /* the almanac tile uses the almanac's bundled fonts, so it needs no Chinese font on the PC */
+  @font-face { font-family: "Almanac Kai"; src: url("fonts/lxgw-wenkai-almanac.woff2") format("woff2"); }
+  @font-face { font-family: "Almanac Brush"; src: url("fonts/ma-shan-zheng-almanac.woff2") format("woff2"); }
+  a.tile b.zh { font-family: "Almanac Brush", "Almanac Kai", serif; font-weight: 400; font-size: 40px; color: #e9c27a; }
+  a.tile span.zh { font-family: "Almanac Kai", sans-serif; }
   a.tile::after { content: ""; position: absolute; right: -60px; top: -60px; width: 200px; height: 200px;
                   border-radius: 50%; background: var(--c); opacity: .10; }
 </style>
@@ -42,14 +47,16 @@
       <svg viewBox="0 0 64 64" fill="none" stroke="var(--sun)" stroke-width="4" stroke-linejoin="round">
         <path d="M10 8h44v32L38 56H10z"/><path d="M38 56V40h16"/><path d="M20 22h24M20 32h14" stroke-linecap="round"/></svg>
       <b>Sticky notes</b><span>Quick notes, kept between runs</span></a>
+    <a class="tile" href="almanac.html" style="--c: #e8695f">
+      <svg viewBox="0 0 64 64" fill="none" stroke="#e8695f" stroke-width="4" stroke-linejoin="round">
+        <rect x="10" y="12" width="44" height="44" rx="6"/><path d="M10 24h44M22 6v12M42 6v12"/>
+        <text x="32" y="48" fill="#e9c27a" stroke="none" font-size="20" font-weight="700" text-anchor="middle"
+              font-family="Almanac Brush, Almanac Kai, serif">历</text></svg>
+      <b class="zh" lang="zh-CN">老黄历</b><span class="zh" lang="zh-CN">农历 · 宜忌 · 节气 · 吉时</span></a>
     <a class="tile" href="demo.html" style="--c: var(--rose)">
       <svg viewBox="0 0 64 64" fill="none" stroke="var(--rose)" stroke-width="4" stroke-linecap="round">
         <rect x="8" y="14" width="48" height="36" rx="18"/><circle cx="40" cy="32" r="10" fill="var(--rose)"/></svg>
-      <b>Touch demo</b><span>Buttons, switches, sliders, paint</span></a>
-    <a class="tile" href="motion.html" style="--c: var(--violet)">
-      <svg viewBox="0 0 64 64" fill="none" stroke="var(--violet)" stroke-width="4" stroke-linecap="round">
-        <circle cx="22" cy="40" r="10"/><path d="M36 26l16-14M30 18l10-8M42 34l12-6"/></svg>
-      <b>Motion test</b><span>How animation feels on the Tab5</span></a>
+      <b>Touch &amp; motion</b><span>Touch demo and animation test</span></a>
     <div class="tile own">
       <b>Your own page</b>
       <span>On the PC:<br><code>server.py --url https://…</code><br><code>server.py --file page.html</code></span></div>

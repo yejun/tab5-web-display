@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>老黄历</title>
+<link rel="stylesheet" href="common.css">
+<style>
+  /* Chinese almanac: warm red and gold on the shared dark theme */
+  :root { --red: #e8695f; --red-soft: #4a2427; --gold: #e9c27a; --jade: #6fcf9f; --jade-soft: #1f3a30;
+          --cjk: "Almanac Kai", "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+          --serif: "Almanac Brush", "Almanac Kai", serif; }
+  /* Bundled fonts, cut down to the characters the almanac can show (see fonts/): LXGW WenKai for the text,
+     Ma Shan Zheng brush lettering for the big characters. No Chinese font is needed on the PC. */
+  @font-face { font-family: "Almanac Kai"; src: url("fonts/lxgw-wenkai-almanac.woff2") format("woff2"); }
+  @font-face { font-family: "Almanac Brush"; src: url("fonts/ma-shan-zheng-almanac.woff2") format("woff2"); }
+  body { font-family: var(--cjk); padding: 22px 28px; display: grid; gap: 14px;
+         grid-template: "head head" 56px "day yiji" 214px "day info" 1fr "hours hours" 104px / 392px 1fr; }
+  header { grid-area: head; display: flex; align-items: center; gap: 12px; }
+  header h1 { font-family: var(--serif); font-size: 34px; font-weight: 700; color: var(--gold); letter-spacing: 4px; }
+  header .sp { flex: 1; }
+  header button { height: 52px; padding: 0 20px; font-size: 20px; font-family: var(--cjk); }
+  #today { background: var(--red-soft); border-color: var(--red); }
+
+  #day { grid-area: day; display: flex; flex-direction: column; align-items: center; text-align: center; padding: 18px 20px; }
+  #ym { font-size: 22px; color: var(--dim); }
+  #dnum { font-size: 132px; font-weight: 300; line-height: 1; color: var(--red); margin: 2px 0; font-family: "Noto Sans", sans-serif; }
+  #week { font-size: 22px; color: var(--dim); }
+  #lunar { font-family: var(--serif); font-size: 50px; color: var(--gold); margin-top: 10px; letter-spacing: 2px; }
+  #gz { font-size: 21px; margin-top: 6px; }
+  #term { font-size: 19px; color: var(--dim); margin-top: 10px; }
+  #fest { font-size: 19px; color: var(--red); margin-top: 4px; min-height: 26px; }
+  #badges { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: auto; }
+  .badge { font-size: 17px; padding: 4px 12px; border-radius: 10px; background: var(--card2); color: var(--dim); }
+  .badge.good { background: var(--jade-soft); color: var(--jade); }
+  .badge.bad { background: var(--red-soft); color: var(--red); }
+
+  #yiji { grid-area: yiji; display: grid; grid-template-columns: 3fr 2fr; gap: 14px; }
+  .yj { display: flex; gap: 16px; padding: 16px 20px; overflow: hidden; }
+  .yj .big { flex: none; width: 74px; height: 74px; border-radius: 50%; display: grid; place-items: center;
+             font-family: var(--serif); font-size: 42px; font-weight: 700; }
+  #yi .big { background: var(--jade-soft); color: var(--jade); }
+  #ji .big { background: var(--red-soft); color: var(--red); }
+  .yj .items { font-size: 22px; line-height: 1.5; overflow: hidden; flex: 1; min-height: 0; max-height: 100%; }
+  .yj { min-height: 0; }
+  .yj .items span { display: inline-block; margin-right: .6em; }
+
+  #info { grid-area: info; display: grid; grid-template-columns: 1fr 1fr; gap: 8px 26px; align-content: start; padding: 16px 22px; }
+  .row { display: flex; gap: 14px; font-size: 19px; line-height: 1.45; min-width: 0; }
+  .row b { flex: none; width: 76px; color: var(--gold); font-weight: 500; }
+  .row span { min-width: 0; }
+  .row.wide { grid-column: 1 / -1; }
+
+  #hours { grid-area: hours; display: grid; grid-template-columns: repeat(12, 1fr); gap: 6px; padding: 12px 14px; }
+  .h { border-radius: 14px; display: flex; flex-direction: column; align-items: center; justify-content: center;
+       background: var(--card2); }
+  .h b { font-family: var(--serif); font-size: 26px; font-weight: 600; }
+  .h small { font-size: 14px; color: var(--faint); }
+  .h i { font-style: normal; font-size: 16px; }
+  .h.good i { color: var(--jade); }
+  .h.bad i { color: var(--red); }
+  .h.now { outline: 2px solid var(--gold); background: #2b2a24; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>老黄历</h1><span class="sp"></span>
+    <button id="prev">‹ 前一天</button><button id="today">今天</button><button id="next">后一天 ›</button>
+    <a class="home" data-label="主页"></a>
+  </header>
+  <section class="card" id="day">
+    <div id="ym"></div><div id="dnum" class="num"></div><div id="week"></div>
+    <div id="lunar"></div><div id="gz"></div><div id="term"></div><div id="fest"></div>
+    <div id="badges"></div>
+  </section>
+  <section id="yiji">
+    <div class="card yj" id="yi"><div class="big">宜</div><div class="items"></div></div>
+    <div class="card yj" id="ji"><div class="big">忌</div><div class="items"></div></div>
+  </section>
+  <section class="card" id="info"></section>
+  <section class="card" id="hours"></section>
+
+<script src="vendor/lunar.js" charset="utf-8"></script>
+<script src="common.js"></script>
+<script>
+  let offset = 0;   // days from today
+
+  // shrink a list's text until it fits its box (some days have twenty or more 宜/忌 items)
+  function fit(el) {
+    let size = 22;
+    el.style.fontSize = size + "px";
+    while (el.scrollHeight > el.clientHeight + 1 && size > 14) el.style.fontSize = --size + "px";
+  }
+  const WEEK = "日一二三四五六";
+  const HOURS = ["23-1", "1-3", "3-5", "5-7", "7-9", "9-11", "11-13", "13-15", "15-17", "17-19", "19-21", "21-23"];
+
+  function render() {
+    const now = new Date();
+    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + offset, offset ? 12 : now.getHours(), now.getMinutes());
+    const solar = Solar.fromDate(d), lunar = solar.getLunar();
+
+    $("ym").textContent = `${d.getFullYear()}年${d.getMonth() + 1}月`;
+    $("dnum").textContent = d.getDate();
+    $("week").textContent = "星期" + WEEK[d.getDay()] + (offset ? (offset > 0 ? ` · ${offset}天后` : ` · ${-offset}天前`) : " · 今天");
+    $("lunar").textContent = `${lunar.getMonthInChinese()}月${lunar.getDayInChinese()}`;
+    $("gz").textContent = `${lunar.getYearInGanZhi()}年【${lunar.getYearShengXiao()}年】${lunar.getMonthInGanZhi()}月 ${lunar.getDayInGanZhi()}日`;
+
+    // solar term: today's, or days since the last and until the next
+    const jq = lunar.getJieQi(), next = lunar.getNextJieQi(), prev = lunar.getPrevJieQi();
+    const days = s => Math.round((new Date(s.getYear(), s.getMonth() - 1, s.getDay()) - new Date(d.getFullYear(), d.getMonth(), d.getDate())) / 864e5);
+    $("term").textContent = jq ? `今日${jq}` : `${prev.getName()}第${1 - days(prev.getSolar())}天 · 距${next.getName()}还有${days(next.getSolar())}天`;
+    $("fest").textContent = [...lunar.getFestivals(), ...solar.getFestivals()].join("  ");
+
+    const luck = lunar.getDayTianShenLuck() === "吉";
+    $("badges").innerHTML = [
+      [`${lunar.getDayTianShen()} · ${lunar.getDayTianShenType()}日`, luck ? "good" : "bad"],
+      [`${lunar.getZhiXing()}日`, ""],
+      [`${lunar.getXiu()}${lunar.getZheng()}${lunar.getAnimal()} · ${lunar.getXiuLuck()}`, lunar.getXiuLuck() === "吉" ? "good" : "bad"],
+      [lunar.getYueXiang() + "月", ""],
+    ].map(([t, c]) => `<span class="badge ${c}">${t}</span>`).join("");
+
+    const chips = a => a.length ? a.map(x => `<span>${x}</span>`).join("") : "<span class='dim'>诸事不宜</span>";
+    $("yi").querySelector(".items").innerHTML = chips(lunar.getDayYi());
+    $("ji").querySelector(".items").innerHTML = chips(lunar.getDayJi());
+    document.querySelectorAll(".yj .items").forEach(fit);
+
+    const row = (k, v, wide) => `<div class="row${wide ? " wide" : ""}"><b>${k}</b><span>${v}</span></div>`;
+    $("info").innerHTML =
+      row("冲煞", `冲${lunar.getDayChongDesc()} · 煞${lunar.getDaySha()}`) +
+      row("五行", `${lunar.getDayNaYin()}`) +
+      row("吉神方位", `喜神${lunar.getDayPositionXiDesc()} · 财神${lunar.getDayPositionCaiDesc()} · 福神${lunar.getDayPositionFuDesc()}`, true) +
+      row("胎神", lunar.getDayPositionTai()) +
+      row("彭祖百忌", `${lunar.getPengZuGan()}<br>${lunar.getPengZuZhi()}`) +
+      row("吉神宜趋", lunar.getDayJiShen().join(" "), true) +
+      row("凶煞宜忌", lunar.getDayXiongSha().join(" "), true);
+
+    // the twelve double-hours; the current one is marked when showing today
+    const nowZhi = offset ? -1 : Math.floor(((now.getHours() + 1) % 24) / 2);
+    $("hours").innerHTML = lunar.getTimes().slice(0, 12).map((t, i) => {
+      const good = t.getTianShenLuck() === "吉";
+      return `<div class="h ${good ? "good" : "bad"}${i === nowZhi ? " now" : ""}"><b>${t.getZhi()}</b>
+              <small>${HOURS[i]}</small><i>${good ? "吉" : "凶"}</i></div>`;
+    }).join("");
+  }
+
+  $("prev").onclick = () => { offset--; render(); };
+  $("next").onclick = () => { offset++; render(); };
+  $("today").onclick = () => { offset = 0; render(); };
+  everyMinute(render);
+  document.fonts.ready.then(render);   // fit the lists again once the bundled font has loaded   // only the day and the current double-hour can change, so most minutes repaint nothing
+</script>
+</body>
+</html>

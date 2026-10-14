@@ -1,0 +1,8 @@
+Fonts for the almanac (老黄历), cut down to the characters it can show:
+
+  lxgw-wenkai-almanac.woff2    LXGW WenKai 霞鹜文楷 v1.522 (https://github.com/lxgw/LxgwWenKai), SIL OFL 1.1
+                               - every CJK character in ../vendor/lunar.js, almanac.html and home.html, plus ASCII
+  ma-shan-zheng-almanac.woff2  Ma Shan Zheng 马善政 (https://github.com/google/fonts/tree/main/ofl/mashanzheng), SIL OFL 1.1
+                               - only the big characters: 老黄历宜忌, the twelve branches, lunar month and day names
+
+Made with fontTools:  pyftsubset FONT.ttf --text-file=CHARS.txt --flavor=woff2 --layout-features='*'

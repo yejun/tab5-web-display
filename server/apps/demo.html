@@ -18,7 +18,9 @@
   header .sub { color: var(--dim); font-size: 20px; }
   #motion { margin-left: auto; color: var(--ink); text-decoration: none; font-size: 22px; padding: 12px 22px;
             border: 1px solid var(--line); border-radius: 16px; background: var(--accent-soft); }
-  #motion:active { background: var(--accent); color: var(--bg); }
+  #home { margin-left: 14px; color: var(--ink); text-decoration: none; font-size: 22px; padding: 12px 22px;
+          border: 1px solid var(--line); border-radius: 16px; background: var(--card); }
+  #motion:active, #home:active { background: var(--accent); color: var(--bg); }
   #clock { margin-left: 24px; font-size: 40px; font-variant-numeric: tabular-nums; color: var(--accent); }
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 22px; padding: 22px 24px;
           display: flex; flex-direction: column; gap: 14px; }
@@ -64,7 +66,7 @@
 <body>
   <header>
     <h1>Tab5 web display</h1><span class="sub">rendered by Chromium on the PC</span>
-    <a id="motion" href="home.html">⌂ Home</a>
+    <a id="motion" href="motion.html">Motion test →</a><a id="home" href="home.html">⌂ Home</a>
     <div id="clock">--:--:--</div>
   </header>
 

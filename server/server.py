@@ -8,7 +8,7 @@ The Tab5 listens on TCP 8765 and this script connects to it, so the PC needs no 
 
     server.py                          # the home launcher; the Tab5 is found over USB
     server.py --device 192.168.1.50     # Tab5 address given
-    server.py --app dashboard          # a built-in app: home, dashboard, clock, notes, demo, motion
+    server.py --app dashboard          # a built-in app: home, dashboard, clock, notes, almanac, demo, motion
     server.py --url https://example.com
     server.py --file my_page.html      # a local page, reloaded whenever it changes
     server.py --app dashboard --city Berlin --units metric
@@ -44,7 +44,7 @@ RECT = struct.Struct("<4sHHHHI")   # "TAB5", x, y, w, h, jpeg length
 EVENT = struct.Struct("<BBHHH")    # type, 0, x, y, 0
 EV_DOWN, EV_MOVE, EV_UP, EV_SHOWN = 1, 2, 3, 5
 APPS_DIR = pathlib.Path(__file__).with_name("apps")
-APPS = ["home", "dashboard", "clock", "notes", "demo", "motion"]
+APPS = ["home", "dashboard", "clock", "notes", "almanac", "demo", "motion"]
 PROFILE_DIR = pathlib.Path(os.environ.get("XDG_DATA_HOME", pathlib.Path.home() / ".local/share")) / "tab5-web-display"
 ESPRESSIF_USB_VID = 0x303A
 TIMEOUTS = (TimeoutError, asyncio.TimeoutError)   # the same class from Python 3.11 on, different before

@@ -10,8 +10,8 @@ Version 1.0.0 · MIT licence
 
 | | |
 |---|---|
-| ![Dashboard](docs/dashboard.png) | ![Clock](docs/clock.png) |
-| **Dashboard**: time, weather, 24-hour chart, forecast, air quality, headlines | **Clock**: big clock, calendar, world clocks |
+| ![Dashboard](docs/dashboard.png) | ![Chinese almanac](docs/almanac.png) |
+| **Dashboard**: time, weather, 24-hour chart, forecast, air quality, headlines | **老黄历 (Chinese almanac)**: lunar date, 宜忌, solar terms, auspicious hours |
 | ![Sticky notes](docs/notes.png) | ![Editing a note](docs/notes_edit.png) |
 | **Sticky notes**, kept between runs | ...with their own on-screen keyboard |
 
@@ -27,7 +27,7 @@ Version 1.0.0 · MIT licence
     about 1–2 ms.
   - **Responsive.** A tap shows its result in about 80–150 ms, and animations run at 15–28 fps.
 - **Built-in apps that need no API keys:** a home launcher, a dashboard, a clock with calendar, sticky notes, a
-  touch demo and a motion test.
+  Chinese almanac (老黄历), and a touch demo with a motion test.
 - **Setup on the device.** A settings panel opens on first start to pick a WiFi network with an on-screen keyboard.
   Later, swipe in from any screen edge to change WiFi, brightness or orientation.
 - **No firewall changes.** The Tab5 listens and the PC connects out to it.
@@ -85,7 +85,8 @@ python3 -m venv .venv
 | `server.py --app dashboard` | time, current weather, 24-hour chart, 6-day forecast, air quality, Hacker News |
 | `server.py --app clock` | big clock (tap it for seconds), month calendar, three world clocks |
 | `server.py --app notes` | sticky notes with an on-screen keyboard |
-| `server.py --app demo` | touch demo: buttons, switches, sliders, finger paint |
+| `server.py --app almanac` | 老黄历: lunar date, 干支, 宜/忌, 冲煞, solar terms, festivals, the twelve double-hours (in Chinese) |
+| `server.py --app demo` | touch demo: buttons, switches, sliders, finger paint (links to the motion test) |
 | `server.py --app motion` | animation test with live frame rate |
 | `server.py --url https://example.com` | any web page |
 | `server.py --file my_page.html` | a local page, reloaded whenever it (or a file next to it) changes |
@@ -211,3 +212,9 @@ USB serial at 115200 baud:
 ## Licence
 
 [MIT](LICENSE) © 2026 Yejun Yang
+
+The almanac includes these third-party components:
+- [lunar-javascript](https://github.com/6tail/lunar-javascript) by 6tail (MIT): unmodified, in `server/apps/vendor/`.
+- [LXGW WenKai](https://github.com/lxgw/LxgwWenKai) and [Ma Shan Zheng](https://github.com/google/fonts/tree/main/ofl/mashanzheng)
+  (SIL Open Font License 1.1): cut down to the characters the almanac uses, in `server/apps/fonts/`. Because they
+  are bundled, no Chinese font is needed on the PC.

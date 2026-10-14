@@ -14,6 +14,7 @@
          padding: 24px 28px; height: 100%; }
   aside { display: flex; flex-direction: column; gap: 12px; }
   h1 { font-size: 30px; font-weight: 600; margin-bottom: 6px; }
+  .links { display: flex; gap: 24px; }
   a.back { color: var(--dim); text-decoration: none; font-size: 20px; }
   button { font: inherit; font-size: 24px; color: var(--ink); background: rgba(26, 31, 43, .85);
            border: 1px solid var(--line); border-radius: 16px; height: 64px; text-align: left; padding: 0 20px; }
@@ -48,7 +49,7 @@
 <main>
   <aside>
     <h1>Motion test</h1>
-    <a class="back" href="home.html">⌂ Home</a>
+    <span class="links"><a class="back" href="demo.html">← Touch demo</a><a class="back" href="home.html">⌂ Home</a></span>
     <button data-scene="spin">Spinner<small>small area · ~4% of screen</small></button>
     <button data-scene="balls">Bouncing balls<small>scattered · ~10–40%</small></button>
     <button data-scene="follow">Follow finger<small>drag in the panel</small></button>

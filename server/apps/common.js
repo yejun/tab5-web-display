@@ -3,11 +3,11 @@
 const TAB5 = window.TAB5 || {};
 const $ = id => document.getElementById(id);
 
-// Fill every <a class="home"> with the house icon + label.
+// Fill every <a class="home"> with the house icon + label ("Home", or its data-label).
 document.querySelectorAll("a.home").forEach(a => {
   a.href = "home.html";
   a.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round">
-    <path d="M3 11 12 3l9 8M5 9.5V21h5v-6h4v6h5V9.5"/></svg>Home`;
+    <path d="M3 11 12 3l9 8M5 9.5V21h5v-6h4v6h5V9.5"/></svg>${a.dataset.label || "Home"}`;
 });
 
 // Call fn now and then at the start of every minute (one screen update per minute, not per second).
