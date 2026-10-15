@@ -3,8 +3,28 @@
 Versions follow [semantic versioning](https://semver.org). The firmware prints its version at boot, in the serial
 `S` statistics and in its settings panel; the server prints it at start and with `--version`.
 
-## Unreleased
+## 1.1.0 - 2026-10-14
 
+- **Sound.** What the page plays comes out of the Tab5's speaker (or headphones). The server runs Chromium with a
+  private PulseAudio/PipeWire sink, records it and streams 48 kHz stereo PCM over UDP while there is sound. The
+  firmware plays it through an adaptive jitter buffer (40–250 ms, starting at 60 ms) that follows WiFi hiccups
+  and the clock difference between PC and Tab5. Needs a Linux PC with `pactl` and `parec`; `--no-audio` turns it
+  off. Firmware older than 1.1 keeps working without sound.
+- **`--power-save auto|off`:** `off` keeps the Tab5's WiFi power save off the whole time, for the quickest
+  response at the cost of battery. `auto` (the default) also switches it off while sound plays.
+- **Volume** slider in the Tab5's settings, remembered. The speaker is powered only while sound plays.
+- **Touch demo with sound:** the buttons and switches click, a Music switch plays an arpeggio, finger paint plays
+  a tone that follows your finger, and the Volume slider sets the level.
+- **Fix: dragging on a busy page no longer drops the frame rate** to 2–3 fps with touch delays growing past a second.
+  The server waited for Chromium to handle each touch before reading the Tab5's next message, so its "shown" acks
+  queued behind finger moves. Touches now go to the page from their own queue, and waiting moves collapse into the
+  newest.
+- **Faster server:** comparing frames took 24 ms and ran on the event loop, holding up touches, acks and sound.
+  It now takes about 2 ms, in a worker thread with the JPEG encoding. Server CPU dropped from a full core to about
+  a third on the follow-finger test, which now reaches the 30 fps cap with touch-to-screen at about 40 ms (was
+  70–120 ms). Full-screen animation went from 15–17 to about 19 fps.
+- **Fix:** `APPS_DIR` is resolved, so the server also starts when `__file__` is relative (e.g. under `-m cProfile`).
+- **Protocol:** on connect the firmware sends a hello with its version; the server sends settings only after one.
 - **New app: 老黄历 (Chinese almanac),** `--app almanac`. It shows the lunar date, 干支 and zodiac, 宜/忌, 冲煞,
   吉神方位, 彭祖百忌, solar terms and festivals, and the auspicious hours. Browse days with 前一天/后一天. Built on
   lunar-javascript (MIT), which works offline. It uses bundled LXGW WenKai and Ma Shan Zheng brush lettering,

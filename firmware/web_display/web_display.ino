@@ -5,18 +5,22 @@
 // PC -> Tab5: updates, each a run of rectangles followed by an end marker. A rectangle is a 16-byte header
 //             { "TAB5", u16 x, y, w, h, u32 len } (little endian) and `len` bytes of baseline JPEG; x, y, w and h
 //             are multiples of 16. The end marker is a header with w = h = len = 0.
-// Tab5 -> PC: 8-byte records { u8 type, u8 0, u16 x, u16 y, u16 0 }: 1 = touch down, 2 = move, 3 = up,
-//             5 = update shown (sent after each end marker, so the PC never has more than one update in flight).
+//             A header with magic "TCFG" instead is a setting: x = WiFi power save (0 auto, 1 always off).
+// Tab5 -> PC: 8-byte records { u8 type, u8 flags, u16 x, u16 y, u16 z }: 1 = touch down, 2 = move, 3 = up,
+//             5 = update shown (sent after each end marker, so the PC never has more than one update in flight),
+//             6 = hello, sent on connect: x.y.z = firmware version, flags bit 0 = can play sound. The PC sends
+//             "TCFG" only after a hello, so older firmware never sees one.
+// Sound arrives separately as UDP, see audio.h.
 //
 // Each rectangle is decoded by the P4's hardware JPEG engine to RGB565 and rotated into the panel's portrait
 // frame buffer by the PPA (both DMA, the CPU only waits).
 //
-// Settings (WiFi, brightness, flip): swipe in from any edge, or tap the screen while no page is shown. The panel
+// Settings (WiFi, brightness, volume, flip): swipe in from any edge, or tap the screen while no page is shown. The panel
 // (settings_ui.h, LVGL) also opens by itself when no WiFi network is configured or the saved one can't be joined.
 //
 // Serial commands: ip | wifi <ssid> <password> | rot | S (stats) | F (dump the frame buffer, see tools/shot.py)
 //                  | T <x> <y> (scripted tap) | drag <x0> <y0> <x1> <y1> [ms] | panel (open the settings)
-//                  | forget (erase saved settings and restart)
+//                  | beep (speaker check) | forget (erase saved settings and restart)
 #include <M5Unified.h>
 #include <WiFi.h>
 #include <Preferences.h>
@@ -28,22 +32,23 @@
 #include <esp_heap_caps.h>
 #include <esp_timer.h>
 
-static constexpr const char* FIRMWARE_VERSION = "1.0.0";
+static constexpr const char* FIRMWARE_VERSION = "1.1.0";
 static constexpr int SCR_W = 1280, SCR_H = 720;   // landscape, as the page is rendered
 static constexpr int FB_W = 720, FB_H = 1280;     // the panel's native portrait frame buffer
 static constexpr uint16_t PORT = 8765;
 static constexpr size_t JPEG_MAX = 1 << 20;        // largest accepted rectangle (a full-screen q90 frame is ~300 KB)
 static constexpr int64_t AWAKE_AFTER_TOUCH_MS = 10000;   // WiFi power save stays off this long after a touch
 static constexpr int64_t AWAKE_AFTER_STREAM_MS = 3000;   // ... and this long after updates came faster than 1 per 400 ms
+static constexpr int64_t AWAKE_AFTER_SOUND_MS = 1000;    // ... and this long after sound
 static constexpr int64_t CONNECT_TIMEOUT_MS = 20000, RETRY_MS = 30000;
 static constexpr int EDGE = 40, SWIPE_IN = 120;           // edge swipe: start within EDGE px, move SWIPE_IN px inwards
 static constexpr int64_t SWIPE_MS = 700;
 
-enum : uint8_t { EV_DOWN = 1, EV_MOVE = 2, EV_UP = 3, EV_SHOWN = 5 };
+enum : uint8_t { EV_DOWN = 1, EV_MOVE = 2, EV_UP = 3, EV_SHOWN = 5, EV_HELLO = 6 };
 
 #pragma pack(push, 1)
 struct RectHeader { char magic[4]; uint16_t x, y, w, h; uint32_t len; };
-struct Event { uint8_t type, pad; uint16_t x, y, pad2; };
+struct Event { uint8_t type, flags; uint16_t x, y, z; };
 #pragma pack(pop)
 static_assert(sizeof(RectHeader) == 16 && sizeof(Event) == 8, "wire format");
 
@@ -65,6 +70,7 @@ static bool g_panel_open = false;
 static int64_t g_last_touch = -AWAKE_AFTER_TOUCH_MS;
 static int64_t g_last_update = 0, g_last_stream = -AWAKE_AFTER_STREAM_MS;
 static bool g_wifi_sleep = true;
+static uint8_t g_power_mode = 0;          // from the PC: 0 = auto, 1 = power save always off
 
 enum WifiState { WIFI_NONE, WIFI_CONNECTING, WIFI_UP, WIFI_FAILED };
 static WifiState g_wifi = WIFI_NONE;
@@ -81,6 +87,8 @@ static Stats g_stats = {};
 
 static int64_t now_ms() { return esp_timer_get_time() / 1000; }
 static void panel_open();
+
+#include "audio.h"
 
 // ---- display ------------------------------------------------------------------------------------------------
 
@@ -172,15 +180,17 @@ static bool ppa_blit(const void* src, int x, int y, int w, int h) {
 
 // ---- PC connection ------------------------------------------------------------------------------------------
 
-static void send_event(uint8_t type, int x, int y) {
+static void send_event(uint8_t type, int x, int y, uint8_t flags = 0, uint16_t z = 0) {
   if (!g_have_client || !g_client.connected()) return;
-  const Event e = {type, 0, (uint16_t)x, (uint16_t)y, 0};
+  const Event e = {type, flags, (uint16_t)x, (uint16_t)y, z};
   g_client.write((const uint8_t*)&e, sizeof(e));
 }
 
 static void drop_client() {
   if (g_have_client) g_client.stop();
   g_have_client = g_shown_any = false;
+  g_pc_ip = 0;
+  g_power_mode = 0;
 }
 
 static bool read_exact(uint8_t* p, size_t n) {
@@ -198,7 +208,13 @@ static bool read_exact(uint8_t* p, size_t n) {
 static bool handle_rect() {
   RectHeader h;
   const int64_t t0 = esp_timer_get_time();
-  if (!read_exact((uint8_t*)&h, sizeof(h)) || memcmp(h.magic, "TAB5", 4) != 0) { Serial.println("ERR bad header"); return false; }
+  if (!read_exact((uint8_t*)&h, sizeof(h))) { Serial.println("ERR short header"); return false; }
+  if (memcmp(h.magic, "TCFG", 4) == 0) {   // a setting
+    g_power_mode = h.x == 1 ? 1 : 0;
+    Serial.printf("PC: WiFi power save %s\n", g_power_mode ? "off" : "auto");
+    return true;
+  }
+  if (memcmp(h.magic, "TAB5", 4) != 0) { Serial.println("ERR bad header"); return false; }
   if (h.w == 0 && h.h == 0) {   // end of update
     // continuous changes (an animation) arrive much faster under modem sleep's ~100 ms wake-ups if the radio stays on;
     // a once-a-second clock tick doesn't count
@@ -246,7 +262,9 @@ static void pc_poll() {
     g_client = incoming;
     g_client.setNoDelay(true);
     g_have_client = true;
+    g_pc_ip = (uint32_t)g_client.remoteIP();
     Serial.printf("PC connected from %s\n", g_client.remoteIP().toString().c_str());
+    send_event(EV_HELLO, 1, 1, 1, 0);   // version 1.1.0, can play sound
   }
   if (!g_have_client) return;
   if (!g_client.connected()) {
@@ -305,6 +323,7 @@ static void wifi_poll() {
           prefs.putString("pass", g_pass);
         }
         if (!listening) { g_server.begin(); g_server.setNoDelay(true); listening = true; }
+        audio_start();
         g_wifi_sleep = !g_wifi_sleep;   // force the next call to apply
         set_wifi_sleep(true);
         Serial.printf("IP %s\n", WiFi.localIP().toString().c_str());
@@ -424,12 +443,19 @@ static void dump_framebuffer() {
 static void print_stats() {
   const Stats s = g_stats;
   const uint32_t r = s.rects ? s.rects : 1;
+  const AudioStats a = g_astats;
   Serial.printf("v%s | updates %u rects %u bytes %llu | per rect: recv %.1f ms decode %.1f ms ppa %.1f ms | wifi rssi %d sleep %s | "
                 "psram free %u\n",
                 FIRMWARE_VERSION, (unsigned)s.updates, (unsigned)s.rects, (unsigned long long)s.bytes, s.recv_us / 1000.0 / r,
                 s.decode_us / 1000.0 / r, s.ppa_us / 1000.0 / r, (int)WiFi.RSSI(), g_wifi_sleep ? "on" : "off",
                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+  Serial.printf("sound | packets %u late %u lost %u frames hold-ups %u | steering: dropped %u repeated %u | buffer %d ms "
+                "(target %d) | speaker %s vol %u\n",
+                (unsigned)a.packets, (unsigned)a.late, (unsigned)a.lost_frames, (unsigned)a.holdups, (unsigned)a.dropped,
+                (unsigned)a.repeated, (int)(g_level * 1000 / AUDIO_RATE), g_target * 1000 / AUDIO_RATE,
+                g_spk_ready ? "on" : "off", g_vol);
   g_stats = {};
+  g_astats = {};
 }
 
 static void handle_serial() {
@@ -470,6 +496,14 @@ static void handle_serial() {
       sscanf(line.c_str() + 5, "%d %d %d %d %d", &x0, &y0, &x1, &y1, &ms);
       script_touch(x0, y0, x1, y1, ms);
       Serial.printf("drag %d,%d -> %d,%d in %d ms\n", x0, y0, x1, y1, ms);
+    } else if (line == "beep") {   // speaker check: a 1 kHz tone, and the codec and amplifier state
+      const bool on = speaker_on();
+      g_spk_keep = now_ms() + 2000;
+      const bool queued = on && M5.Speaker.tone(1000, 500, 1);
+      Serial.printf("beep: speaker %s, running %d, tone %s, vol %u | ES8388 power %02x dac %02x | amp reg %02x\n",
+                    on ? "on" : "FAILED", (int)M5.Speaker.isRunning(), queued ? "queued" : "FAILED", g_vol,
+                    M5.In_I2C.readRegister8(0x10, 2, 400000), M5.In_I2C.readRegister8(0x10, 4, 400000),
+                    M5.In_I2C.readRegister8(0x43, 0x05, 400000));
     } else if (line == "rot") {
       set_rotation(g_rot == 1 ? 3 : 1);
       Serial.printf("rotation %d\n", g_rot);
@@ -477,7 +511,7 @@ static void handle_serial() {
       const int sp = line.indexOf(' ', 5);
       wifi_start(sp > 0 ? line.substring(5, sp) : line.substring(5), sp > 0 ? line.substring(sp + 1) : "");
     } else if (line.length()) {
-      Serial.println("commands: ip | wifi <ssid> <password> | rot | S | F | T <x> <y> | drag x0 y0 x1 y1 [ms] | panel | forget");
+      Serial.println("commands: ip | wifi <ssid> <password> | rot | S | F | T <x> <y> | drag x0 y0 x1 y1 [ms] | panel | beep | forget");
     }
     line = "";
   }
@@ -492,7 +526,7 @@ void setup() {
   cfg.output_power = false;
   cfg.internal_imu = false;
   cfg.internal_mic = false;
-  cfg.internal_spk = false;
+  cfg.internal_spk = true;   // configured here, switched on only while sound plays (audio.h)
   M5.begin(cfg);
   Serial.printf("\nTab5 Web Display %s\n", FIRMWARE_VERSION);
   prefs.begin("webdisp", false);
@@ -500,6 +534,7 @@ void setup() {
   g_bri = (uint8_t)constrain((int)prefs.getUChar("bri", 160), 10, 255);
   M5.Display.setRotation(g_rot);
   M5.Display.setBrightness(g_bri);
+  audio_setup();
   if (!hw_setup()) {
     show_status("Hardware setup failed", "JPEG decoder / PPA / memory");
     for (;;) delay(1000);
@@ -524,7 +559,8 @@ void loop() {
   } else {
     handle_touch();
   }
-  set_wifi_sleep(!g_panel_open && now_ms() - g_last_touch > AWAKE_AFTER_TOUCH_MS &&
-                 now_ms() - g_last_stream > AWAKE_AFTER_STREAM_MS);
+  speaker_poll();
+  set_wifi_sleep(g_power_mode == 0 && !g_panel_open && now_ms() - g_last_touch > AWAKE_AFTER_TOUCH_MS &&
+                 now_ms() - g_last_stream > AWAKE_AFTER_STREAM_MS && !audio_recent(AWAKE_AFTER_SOUND_MS));
   delay(5);
 }

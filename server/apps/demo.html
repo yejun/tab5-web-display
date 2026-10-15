@@ -80,17 +80,17 @@
     <h2>Switches</h2>
     <div class="sw on"><span>Desk lamp</span><div class="toggle"></div></div>
     <div class="sw"><span>Fan</span><div class="toggle"></div></div>
-    <div class="sw"><span>Do not disturb</span><div class="toggle"></div></div>
+    <div class="sw" id="music"><span>Music</span><div class="toggle"></div></div>
   </section>
 
   <section class="card" id="slider-card">
     <h2>Sliders</h2>
-    <div class="slide"><span>Volume</span><input id="vol" type="range" min="0" max="100" value="40"><b id="vol-v">40</b></div>
+    <div class="slide"><span>Volume</span><input id="vol" type="range" min="0" max="100" value="80"><b id="vol-v">80</b></div>
     <div class="slide"><span>Accent</span><input id="hue" type="range" min="0" max="360" value="168"><b id="hue-v">168°</b></div>
   </section>
 
   <section class="card" id="paint-card">
-    <div class="row"><h2>Finger paint</h2><span id="taps">drag to draw</span><button class="small" id="clear">Clear</button></div>
+    <div class="row"><h2>Finger paint</h2><span id="taps">drag to draw (and play)</span><button class="small" id="clear">Clear</button></div>
     <canvas id="paint"></canvas>
   </section>
 
@@ -103,15 +103,36 @@
 
   // counter
   let n = 0;
-  $("inc").onclick = () => $("count").textContent = ++n;
-  $("dec").onclick = () => $("count").textContent = --n;
+  $("inc").onclick = () => { $("count").textContent = ++n; blip(660 * 2 ** ((n % 12) / 12)); };
+  $("dec").onclick = () => { $("count").textContent = --n; blip(330 * 2 ** ((n % 12) / 12)); };
 
-  // switches
-  document.querySelectorAll(".sw").forEach(s => s.onclick = () => s.classList.toggle("on"));
+  // sound (played on the Tab5 when the server has sound on): Web Audio, with the Volume slider as master volume
+  const ac = new AudioContext(), master = ac.createGain();
+  master.connect(ac.destination);
+  addEventListener("pointerdown", () => ac.resume());
+  function blip(freq, len = 0.08, type = "triangle", gain = 0.8, at = ac.currentTime) {
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.type = type; o.frequency.value = freq;
+    g.gain.setValueAtTime(gain, at); g.gain.exponentialRampToValueAtTime(0.001, at + len);
+    o.connect(g).connect(master); o.start(at); o.stop(at + len);
+  }
+
+  // switches; "Music" plays a slow arpeggio while on
+  const ARP = [262, 330, 392, 494, 523, 494, 392, 330];
+  let music = null, step = 0;
+  document.querySelectorAll(".sw").forEach(s => s.onclick = () => {
+    const on = s.classList.toggle("on");
+    blip(on ? 880 : 440, 0.06, "square", 0.3);
+    if (s.id === "music") {
+      clearInterval(music); music = null;
+      if (on) music = setInterval(() => blip(ARP[step++ % ARP.length] * (step % 16 < 8 ? 1 : 0.75), 0.6, "triangle", 0.6), 250);
+    }
+  });
 
   // sliders
   const vol = $("vol"), hue = $("hue");
-  const showVol = () => { vol.style.setProperty("--p", vol.value + "%"); $("vol-v").textContent = vol.value; };
+  const showVol = () => { vol.style.setProperty("--p", vol.value + "%"); $("vol-v").textContent = vol.value;
+                          master.gain.value = vol.value / 100; };
   const showHue = () => { document.documentElement.style.setProperty("--hue", hue.value); $("hue-v").textContent = hue.value + "°"; };
   vol.oninput = showVol; hue.oninput = showHue; showVol(); showHue();
 
@@ -120,12 +141,21 @@
   const fit = () => { const r = cv.getBoundingClientRect(); cv.width = r.width; cv.height = r.height; };
   fit();
   let last = null, strokes = 0;
+  // drawing plays a tone: higher towards the top, louder towards the right
+  const tone = ac.createOscillator(), toneGain = ac.createGain();
+  tone.type = "sine"; toneGain.gain.value = 0;
+  tone.connect(toneGain).connect(master); tone.start();
+  const sing = ([x, y]) => {
+    tone.frequency.setTargetAtTime(110 * 2 ** (3 * (1 - y / cv.height)), ac.currentTime, 0.01);
+    toneGain.gain.setTargetAtTime(0.2 + 0.6 * x / cv.width, ac.currentTime, 0.02);
+  };
   const pos = e => { const r = cv.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
   cv.addEventListener("pointerdown", e => {
     last = pos(e); strokes++;
     $("taps").textContent = `stroke ${strokes} at ${Math.round(last[0])}, ${Math.round(last[1])}`;
     cx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--accent");
     cx.beginPath(); cx.arc(last[0], last[1], 5, 0, 7); cx.fill();
+    sing(last);
   });
   cv.addEventListener("pointermove", e => {
     if (!last) return;
@@ -134,9 +164,10 @@
     cx.lineWidth = 10; cx.lineCap = "round";
     cx.beginPath(); cx.moveTo(...last); cx.lineTo(...p); cx.stroke();
     last = p;
+    sing(p);
   });
-  addEventListener("pointerup", () => last = null);
-  $("clear").onclick = () => { cx.clearRect(0, 0, cv.width, cv.height); strokes = 0; $("taps").textContent = "drag to draw"; };
+  addEventListener("pointerup", () => { last = null; toneGain.gain.setTargetAtTime(0, ac.currentTime, 0.05); });
+  $("clear").onclick = () => { cx.clearRect(0, 0, cv.width, cv.height); strokes = 0; $("taps").textContent = "drag to draw (and play)"; };
 </script>
 </body>
 </html>

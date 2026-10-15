@@ -4,7 +4,7 @@ Turn an [M5Stack Tab5](https://docs.m5stack.com/en/core/Tab5) into a touch scree
 server renders a page in headless Chromium on your PC, sends what changed to the Tab5 over WiFi, and passes your
 taps and drags back to the page. Several ready-made apps are included, and you can show any URL or local HTML file.
 
-Version 1.0.0 · MIT licence
+Version 1.1.0 · MIT licence
 
 ![Home launcher on the Tab5](docs/home.png)
 
@@ -26,6 +26,8 @@ Version 1.0.0 · MIT licence
   - **The Tab5 barely works.** Its hardware JPEG decoder and image processor (PPA) put each update on screen in
     about 1–2 ms.
   - **Responsive.** A tap shows its result in about 80–150 ms, and animations run at 15–28 fps.
+- **Sound.** What the page plays comes out of the Tab5's speaker or headphone jack, about a tenth of a second
+  behind the PC, the same as the picture. Needs a Linux PC with PulseAudio or PipeWire.
 - **Built-in apps that need no API keys:** a home launcher, a dashboard, a clock with calendar, sticky notes, a
   Chinese almanac (老黄历), and a touch demo with a motion test.
 - **Setup on the device.** A settings panel opens on first start to pick a WiFi network with an on-screen keyboard.
@@ -38,6 +40,8 @@ Version 1.0.0 · MIT licence
 - **A PC on the same network** with Python 3.9 or newer. Tested on Linux; macOS and Windows should work but are
   untested.
 - **Chromium or Google Chrome.** If neither is installed, Playwright can download its own Chromium.
+- **For sound:** Linux with PulseAudio or PipeWire, and its `pactl` and `parec` tools (packages `pulseaudio-utils`
+  or `libpulse`). Without them everything else works, silently.
 - **To build the firmware:** [Arduino CLI](https://arduino.github.io/arduino-cli/).
 
 ## Quick start
@@ -86,7 +90,7 @@ python3 -m venv .venv
 | `server.py --app clock` | big clock (tap it for seconds), month calendar, three world clocks |
 | `server.py --app notes` | sticky notes with an on-screen keyboard |
 | `server.py --app almanac` | 老黄历: lunar date, 干支, 宜/忌, 冲煞, solar terms, festivals, the twelve double-hours (in Chinese) |
-| `server.py --app demo` | touch demo: buttons, switches, sliders, finger paint (links to the motion test) |
+| `server.py --app demo` | touch demo with sound: buttons, switches, music, sliders, finger paint that plays a tone (links to the motion test) |
 | `server.py --app motion` | animation test with live frame rate |
 | `server.py --url https://example.com` | any web page |
 | `server.py --file my_page.html` | a local page, reloaded whenever it (or a file next to it) changes |
@@ -110,6 +114,8 @@ python3 -m venv .venv
 | `--device IP` | Tab5 address (default: asked over USB) |
 | `--port PORT` | USB serial port (default: found automatically) |
 | `--browser PATH` | Chromium or Chrome executable (default: found on `PATH`) |
+| `--no-audio` | don't send the page's sound |
+| `--power-save auto\|off` | Tab5 WiFi power save. `auto` (default): off only while you touch, the page animates or sound plays. `off`: always off, for the quickest response but shorter battery life |
 | `--quality N` | JPEG quality, default 88 |
 | `--max-fps N` | cap on updates per second, default 30 |
 | `--show` | also open a visible browser window |
@@ -135,7 +141,7 @@ by itself on first start, and whenever the saved network can't be joined.
   - The scan list is sorted strongest first, with "Other network ..." for hidden networks.
   - A network is saved only once it connects. If a new one fails, the Tab5 goes back to the previous network.
 - **Status:** the Tab5's address and the server command.
-- **Display:** brightness, and flip 180°. Both are remembered.
+- **Display and sound:** brightness, volume, and flip 180°. All are remembered.
 
 **While the panel is open,** the PC connection pauses. After **Done**, the PC reconnects within 2 s and redraws the
 page.
@@ -148,6 +154,7 @@ PC: server/server.py                                    Tab5: firmware/web_displ
   screencast frame -> diff in 16x16 tiles   --- JPEG -->  hardware JPEG decode -> PPA rotate -> display
            -> changed rectangles as JPEG                  touch down / move / up
   touch events in the page                  <-- touch --
+  Chromium's sound -> private sink -> parec --- PCM ---> jitter buffer -> speaker   (UDP, port 8765)
 ```
 
 **On the PC:**
@@ -161,8 +168,18 @@ PC: server/server.py                                    Tab5: firmware/web_displ
 - **Drawing:** each rectangle is decoded by the ESP32-P4's hardware JPEG engine, then rotated into the panel's
   portrait frame buffer by the PPA. Both use DMA, so the CPU only waits.
 - **Touch:** touches go back to the PC as touch events.
-- **WiFi power save** turns off for 10 s after a touch and while updates stream in, so replies arrive quickly.
-  Otherwise it stays on.
+- **WiFi power save** turns off for 10 s after a touch, while updates stream in and while sound plays, so replies
+  arrive quickly. Otherwise it stays on. `--power-save off` keeps it off.
+
+**Sound:**
+- **On the PC:** Chromium plays into a private PulseAudio/PipeWire sink instead of the PC's speakers. The server
+  records it as 48 kHz stereo and sends 7.5 ms per UDP datagram (1.5 Mbit/s), only while there is sound.
+- **Why UDP:** over TCP, one lost packet holds back everything behind it until it is resent, which you would hear
+  as a stutter. Over UDP a lost packet is 7.5 ms of silence.
+- **On the Tab5:** a jitter buffer evens out WiFi's uneven delivery. It starts at 60 ms, grows after each hold-up
+  and shrinks again while the network is calm. Playing a few frames in 480 more or fewer (at most 0.6 %, too
+  little to hear) keeps it on target and follows the clock difference between PC and Tab5. The speaker is powered
+  only while sound plays.
 
 **Measured with `--app motion`:**
 
@@ -192,8 +209,9 @@ USB serial at 115200 baud:
 | `wifi <ssid> <password>` | join a network |
 | `panel` | open the settings |
 | `rot` | flip the screen 180° |
+| `beep` | play a test tone and print the speaker's state |
 | `forget` | erase all saved settings and restart |
-| `S` | statistics since the last `S` |
+| `S` | statistics since the last `S`, including sound |
 | `T <x> <y>`, `drag <x0> <y0> <x1> <y1> [ms]` | scripted touches, for testing without a finger |
 | `unconfigured` | behave like a first start until the next reboot |
 | `F` | dump the frame buffer; `tools/shot.py out.png` saves it as a PNG |
@@ -207,6 +225,11 @@ USB serial at 115200 baud:
   - Check that the server prints `showing on Tab5`.
 - **The screen stays black after flashing:** the build doesn't match your chip revision. See
   [Flash the firmware](#1-flash-the-firmware).
+- **No sound:**
+  - The server prints `with sound` once connected. If it says the firmware is older than 1.1, flash the new one.
+  - `sound: off (needs PulseAudio or PipeWire ...)`: install `pactl` and `parec`. Sound works on Linux only.
+  - Check the volume in the Tab5's settings.
+  - Many sites start sound only after a tap.
 - **Chromium not found:** run `.venv/bin/playwright install chromium`, or pass `--browser /path/to/chrome`.
 
 ## Licence

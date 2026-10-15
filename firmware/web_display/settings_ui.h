@@ -1,4 +1,4 @@
-// Settings panel (LVGL): WiFi network list and password entry, connection status, brightness, flip.
+// Settings panel (LVGL): WiFi network list and password entry, connection status, brightness, volume, flip.
 // Included by web_display.ino after the WiFi and display helpers. LVGL only runs while the panel is open; its
 // strips are rotated into the frame buffer by the PPA like the page rectangles. While the panel is open the PC
 // connection is refused; the PC reconnects within 2 s of closing and sends a full frame.
@@ -15,7 +15,7 @@ static int g_net_count = 0;
 static lv_display_t* g_disp;
 static lv_obj_t *ui_wifi, *ui_addr, *ui_pc, *ui_hint, *ui_list, *ui_scan_btn, *ui_scan_lbl;
 static lv_obj_t *ui_modal, *ui_modal_title, *ui_ta_ssid, *ui_ta_pass, *ui_show_btn, *ui_msg, *ui_spinner, *ui_kb;
-static lv_obj_t *ui_connect_btn, *ui_bri, *ui_flip;
+static lv_obj_t *ui_connect_btn, *ui_bri, *ui_vol, *ui_flip;
 static bool g_scanning = false, g_connect_pending = false, g_touch_block = false;
 static String g_pending_ssid;   // the network the dialog is joining
 
@@ -365,6 +365,7 @@ static void panel_open() {
   drop_client();
   g_touch_block = read_touch().pressed;
   lv_slider_set_value(ui_bri, g_bri, LV_ANIM_OFF);
+  lv_slider_set_value(ui_vol, g_vol, LV_ANIM_OFF);
   if (g_rot == 3) lv_obj_add_state(ui_flip, LV_STATE_CHECKED);
   else lv_obj_remove_state(ui_flip, LV_STATE_CHECKED);
   ui_refresh_status();
@@ -425,17 +426,31 @@ static void ui_setup() {
 
   // display
   lv_obj_t* dc = ui_card(scr, 32, 396, 410, 190);
-  ui_label(dc, "Brightness", &lv_font_montserrat_20, C_INK);
+  lv_obj_t* bl = ui_label(dc, "Brightness", &lv_font_montserrat_20, C_INK);
+  lv_obj_set_pos(bl, 0, 6);
   ui_bri = lv_slider_create(dc);
   lv_slider_set_range(ui_bri, 10, 255);
-  lv_obj_set_size(ui_bri, 340, 16);
-  lv_obj_set_pos(ui_bri, 8, 46);
-  lv_obj_set_ext_click_area(ui_bri, 24);
+  lv_obj_set_size(ui_bri, 210, 16);
+  lv_obj_set_pos(ui_bri, 150, 10);
+  lv_obj_set_ext_click_area(ui_bri, 20);
   lv_obj_add_event_cb(ui_bri, [](lv_event_t*) {
     g_bri = (uint8_t)lv_slider_get_value(ui_bri);
     M5.Display.setBrightness(g_bri);
   }, LV_EVENT_VALUE_CHANGED, nullptr);
   lv_obj_add_event_cb(ui_bri, [](lv_event_t*) { prefs.putUChar("bri", g_bri); }, LV_EVENT_RELEASED, nullptr);
+  lv_obj_t* vl = ui_label(dc, "Volume", &lv_font_montserrat_20, C_INK);
+  lv_obj_set_pos(vl, 0, 56);
+  ui_vol = lv_slider_create(dc);
+  lv_slider_set_range(ui_vol, 0, 255);
+  lv_obj_set_size(ui_vol, 210, 16);
+  lv_obj_set_pos(ui_vol, 150, 60);
+  lv_obj_set_ext_click_area(ui_vol, 20);
+  lv_obj_add_event_cb(ui_vol, [](lv_event_t*) { set_volume((uint8_t)lv_slider_get_value(ui_vol), false); },
+                      LV_EVENT_VALUE_CHANGED, nullptr);
+  lv_obj_add_event_cb(ui_vol, [](lv_event_t*) {   // save, and let the new level be heard
+    prefs.putUChar("vol", g_vol);
+    set_volume(g_vol, true);
+  }, LV_EVENT_RELEASED, nullptr);
   lv_obj_t* fl = ui_label(dc, "Flip screen 180°", &lv_font_montserrat_20, C_INK);
   lv_obj_set_pos(fl, 0, 104);
   ui_flip = lv_switch_create(dc);
