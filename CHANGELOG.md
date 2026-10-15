@@ -3,6 +3,10 @@
 Versions follow [semantic versioning](https://semver.org). The firmware prints its version at boot, in the serial
 `S` statistics and in its settings panel; the server prints it at start and with `--version`.
 
+## Unreleased
+
+- **Clear message when the browser profile is in use** (another server running) instead of a traceback.
+
 ## 1.1.0 - 2026-10-14
 
 - **Sound.** What the page plays comes out of the Tab5's speaker (or headphones). The server runs Chromium with a
