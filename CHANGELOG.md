@@ -3,6 +3,11 @@
 Versions follow [semantic versioning](https://semver.org). The firmware prints its version at boot, in the serial
 `S` statistics and in its settings panel; the server prints it at start and with `--version`.
 
+## Unreleased
+
+- **Version check:** the server prints the Tab5's firmware version when it connects, and a note when firmware and
+  server are from different releases.
+
 ## 1.2.0 - 2026-10-14
 
 About twice the frame rate: small animations up to 58 fps (was 22–28), full-screen ones about 30 (was 15–19).

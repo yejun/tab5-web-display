@@ -64,6 +64,12 @@ boot. Run `esptool.py --port /dev/ttyACM0 chip_id`:
 - **"revision v1.x":** use the default build.
 - **v3.0 or later:** build with `CHIP=postv3 tools/build.sh upload`.
 
+**Keep the firmware and the server at the same version.** Older and newer versions work together, but only with
+the features both have (for example, sound needs firmware 1.1 or later). The server prints the Tab5's firmware
+version when it connects, and a note when the two differ. Firmware from M5Burner can lag behind a new release
+here for a while; build it yourself as above to get the newest, or use the server from the
+[release](https://github.com/yejun/tab5-web-display/tags) that matches your firmware.
+
 ### 2. Connect the Tab5 to WiFi
 
 On first start the Tab5 shows its settings panel. Pick your network and type the password on the on-screen
@@ -237,6 +243,8 @@ USB serial at 115200 baud:
 - **The Tab5 says "Waiting for the PC" but nothing appears:**
   - The PC and the Tab5 must be able to reach each other: same network, or routed.
   - Check that the server prints `showing on Tab5`.
+- **The server says the firmware is older or newer than the server:** update the older one. See
+  [Flash the firmware](#1-flash-the-firmware).
 - **The screen stays black after flashing:** the build doesn't match your chip revision. See
   [Flash the firmware](#1-flash-the-firmware).
 - **No sound:**

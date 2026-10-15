@@ -189,6 +189,18 @@ def piece_pixels(img, piece, flipped):
     return cols[::-1] if flipped else img[::-1, x:x + w].transpose(1, 0, 2)
 
 
+def check_firmware(firmware):
+    """Say so when the Tab5's firmware and this server are from different releases. They work together either way,
+    but only with the features both have."""
+    server = tuple(int(v) for v in __version__.split(".")[:2])
+    if firmware is None or firmware[:2] < server:
+        print(f"note: the Tab5's firmware is older than this server ({__version__}). It works, but without the newer "
+              "features; update the firmware (M5Burner, or tools/build.sh upload, see the README).")
+    elif firmware[:2] > server:
+        print(f"note: the Tab5's firmware is newer than this server ({__version__}). It works, but without the newer "
+              "features; update the server from https://github.com/yejun/tab5-web-display")
+
+
 class SystemAudio:
     """Chromium plays into a private PulseAudio/PipeWire sink (it honours PULSE_SINK); the sink's monitor is
     recorded with parec and sent to the Tab5 as UDP datagrams while there is sound."""
@@ -275,6 +287,7 @@ class Mirror:
         self.acked = asyncio.Event()
         self.show_times = []                   # send -> shown round trips, for the stats
         self.strips = self.flipped = False     # from the Tab5's hello
+        self.firmware = None                   # (major, minor, patch) from the hello; None: older than 1.1
         self.stats_task = None
         self.live, self.host = False, None   # live: the Tab5 is showing our updates
         self.touches, self.touch_wake = collections.deque(), asyncio.Event()   # touches waiting for the page
@@ -331,13 +344,14 @@ class Mirror:
 
     async def read_events(self, reader):
         while True:
-            kind, flags, x, y, _ = EVENT.unpack(await reader.readexactly(EVENT.size))
+            kind, flags, x, y, _z = EVENT.unpack(await reader.readexactly(EVENT.size))
             if kind == EV_SHOWN:
                 if not self.live:
                     self.live = True
-                    sound = ("with sound" if self.audio.target else "no sound: the Tab5 firmware is older than 1.1") \
-                        if self.audio else "no sound"
-                    print(f"showing on Tab5 {self.host}:{PORT} ({sound})")
+                    fw = "%d.%d.%d" % self.firmware if self.firmware else "older than 1.1"
+                    sound = "with sound" if self.audio and self.audio.target else "no sound"
+                    print(f"showing on Tab5 {self.host}:{PORT} (firmware {fw}, {sound})")
+                    check_firmware(self.firmware)
                 if self.in_flight:
                     sent_at, touch_t = self.in_flight.popleft()
                     now = time.monotonic()
@@ -352,6 +366,7 @@ class Mirror:
                 if self.audio and flags & HELLO_SOUND:
                     self.audio.target = (self.host, PORT)
                 self.strips, self.flipped = bool(flags & HELLO_STRIPS), bool(flags & HELLO_FLIPPED)
+                self.firmware = (x, y, _z)
 
     async def session(self, host):
         self.host = host
@@ -360,6 +375,7 @@ class Mirror:
         self.in_flight.clear()
         self.touches.clear()
         self.strips = self.flipped = False
+        self.firmware = None
         events = asyncio.create_task(self.read_events(reader))
         toucher = asyncio.create_task(self.dispatch_touches())
         prev, last_start, last_sent, needs_settle = None, 0.0, 0.0, False
