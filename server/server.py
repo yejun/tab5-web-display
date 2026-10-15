@@ -560,21 +560,36 @@ async def main():
             audio.close()
 
 
+async def launch(pw, args, audio):
+    """The browser, with a persistent profile so the apps' localStorage (notes, clock options) survives restarts.
+
+    It presents itself like a normal Chrome: some sites treat a browser that announces "HeadlessChrome" or
+    navigator.webdriver as a bot (YouTube stops playback after a minute or so). The user agent is the browser's own
+    with "Headless" removed, read on a first launch."""
+    opts = dict(executable_path=args.browser, headless=not args.show, viewport={"width": W, "height": H},
+                device_scale_factor=1, has_touch=True, args=["--disable-blink-features=AutomationControlled"])
+    if audio:   # Playwright mutes Chromium by default; with sound it plays into our sink instead of the PC's speakers
+        opts.update(env={**os.environ, "PULSE_SINK": audio.sink}, ignore_default_args=["--mute-audio"])
+        opts["args"].append("--autoplay-policy=no-user-gesture-required")
+    try:
+        ctx = await pw.chromium.launch_persistent_context(args.profile, **opts)
+        page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+        ua = await page.evaluate("navigator.userAgent")
+        if "HeadlessChrome" in ua:
+            await ctx.close()
+            ctx = await pw.chromium.launch_persistent_context(args.profile, user_agent=ua.replace("HeadlessChrome", "Chrome"),
+                                                              **opts)
+        return ctx
+    except Exception as e:
+        if "ProcessSingleton" in str(e):   # Chromium allows one instance per profile
+            raise SystemExit(f"The browser profile {args.profile} is in use: is another server.py running? "
+                             "Stop it, or pass --profile with another directory.") from None
+        raise
+
+
 async def run(args, url, watch, settings, host, audio):
-    # Playwright mutes Chromium by default; with sound it plays into our sink instead of the PC's speakers
-    sound = dict(env={**os.environ, "PULSE_SINK": audio.sink}, ignore_default_args=["--mute-audio"],
-                 args=["--autoplay-policy=no-user-gesture-required"]) if audio else {}
     async with async_playwright() as pw:
-        # a persistent profile, so the apps' localStorage (notes, clock options) survives restarts
-        try:
-            ctx = await pw.chromium.launch_persistent_context(
-                args.profile, executable_path=args.browser, headless=not args.show,
-                viewport={"width": W, "height": H}, device_scale_factor=1, has_touch=True, **sound)
-        except Exception as e:
-            if "ProcessSingleton" in str(e):   # Chromium allows one instance per profile
-                raise SystemExit(f"The browser profile {args.profile} is in use: is another server.py running? "
-                                 "Stop it, or pass --profile with another directory.") from None
-            raise
+        ctx = await launch(pw, args, audio)
         await ctx.add_init_script(f"window.TAB5 = {json.dumps(settings)};")
         page = ctx.pages[0] if ctx.pages else await ctx.new_page()
         try:

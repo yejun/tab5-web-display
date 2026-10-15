@@ -5,6 +5,9 @@ Versions follow [semantic versioning](https://semver.org). The firmware prints i
 
 ## Unreleased
 
+- **Fix: YouTube stopped after a minute or so** with "Something went wrong". It treated the headless browser as a
+  bot, from its "HeadlessChrome" user agent and `navigator.webdriver`. The browser now presents itself like a
+  normal Chrome: the same user agent without "Headless", and no automation flag.
 - **Version check:** the server prints the Tab5's firmware version when it connects, and a note when firmware and
   server are from different releases.
 
