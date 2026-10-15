@@ -3,7 +3,9 @@
 Versions follow [semantic versioning](https://semver.org). The firmware prints its version at boot, in the serial
 `S` statistics and in its settings panel; the server prints it at start and with `--version`.
 
-## Unreleased
+## 1.2.2 - 2026-10-15
+
+Server only; use it with firmware 1.2.0.
 
 - **Dynamic quality.** Still content now goes out at JPEG quality 95 (was 88): on the Tab5's 16-bit panel that
   leaves about 0.05 % of pixels on text-heavy pages visibly off, against about 0.6 %. During animations,
