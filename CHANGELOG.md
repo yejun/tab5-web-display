@@ -3,8 +3,21 @@
 Versions follow [semantic versioning](https://semver.org). The firmware prints its version at boot, in the serial
 `S` statistics and in its settings panel; the server prints it at start and with `--version`.
 
-## Unreleased
+## 1.2.0 - 2026-10-14
 
+About twice the frame rate: small animations up to 58 fps (was 22–28), full-screen ones about 30 (was 15–19).
+
+- **Strips:** large changes go out as full-height strips, rotated by the server into the panel's orientation, and
+  the Tab5 decodes them straight into its frame buffer. Measurements showed the PPA copy into the frame buffer cost
+  more than decoding (45 ms per full screen; PSRAM bandwidth is the limit). The server picks rectangles or strips by
+  their measured drawing cost.
+- **Half-resolution colour for moving parts** (4:2:0, about 40 % faster to draw). Tiles sent that way are sent again
+  in full colour once they have stood still for 0.5 s, so text ends up sharp even next to an endless animation.
+- **Two updates in flight during animations**, except right after a touch. `--max-fps` now defaults to 60.
+- **Firmware:** the main loop sleeps 1 ms instead of 5 ms while updates stream in. The hello also reports whether
+  strips are supported and the screen orientation. 1.1 firmware keeps working with this server (rectangles only).
+- **Fix: stripes along drawn lines.** The Tab5's JPEG decoder garbles some images only 16 pixels wide (every other
+  line, depending on the content). Rectangles are now at least 32 pixels wide. This bug was there since 1.0.
 - **Clear message when the browser profile is in use** (another server running) instead of a traceback.
 
 ## 1.1.0 - 2026-10-14

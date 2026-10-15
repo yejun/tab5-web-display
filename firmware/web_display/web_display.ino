@@ -6,10 +6,14 @@
 //             { "TAB5", u16 x, y, w, h, u32 len } (little endian) and `len` bytes of baseline JPEG; x, y, w and h
 //             are multiples of 16. The end marker is a header with w = h = len = 0.
 //             A header with magic "TCFG" instead is a setting: x = WiFi power save (0 auto, 1 always off).
+//             Magic "TABS" is a strip: landscape columns x..x+w at full height (y = 0, h = 720), sent as a
+//             720-wide, w-tall JPEG already rotated into the panel's portrait orientation, and decoded straight
+//             into the frame buffer (see handle_strip).
 // Tab5 -> PC: 8-byte records { u8 type, u8 flags, u16 x, u16 y, u16 z }: 1 = touch down, 2 = move, 3 = up,
 //             5 = update shown (sent after each end marker, so the PC never has more than one update in flight),
-//             6 = hello, sent on connect: x.y.z = firmware version, flags bit 0 = can play sound. The PC sends
-//             "TCFG" only after a hello, so older firmware never sees one.
+//             6 = hello, sent on connect: x.y.z = firmware version; flags: 1 = can play sound, 2 = takes strips,
+//             4 = screen flipped 180°. The PC sends "TCFG" and "TABS" only after a hello, so older firmware never
+//             sees them.
 // Sound arrives separately as UDP, see audio.h.
 //
 // Each rectangle is decoded by the P4's hardware JPEG engine to RGB565 and rotated into the panel's portrait
@@ -32,7 +36,7 @@
 #include <esp_heap_caps.h>
 #include <esp_timer.h>
 
-static constexpr const char* FIRMWARE_VERSION = "1.1.0";
+static constexpr const char* FIRMWARE_VERSION = "1.2.0";
 static constexpr int SCR_W = 1280, SCR_H = 720;   // landscape, as the page is rendered
 static constexpr int FB_W = 720, FB_H = 1280;     // the panel's native portrait frame buffer
 static constexpr uint16_t PORT = 8765;
@@ -45,6 +49,7 @@ static constexpr int EDGE = 40, SWIPE_IN = 120;           // edge swipe: start w
 static constexpr int64_t SWIPE_MS = 700;
 
 enum : uint8_t { EV_DOWN = 1, EV_MOVE = 2, EV_UP = 3, EV_SHOWN = 5, EV_HELLO = 6 };
+enum : uint8_t { HELLO_SOUND = 1, HELLO_STRIPS = 2, HELLO_FLIPPED = 4 };   // hello flags
 
 #pragma pack(push, 1)
 struct RectHeader { char magic[4]; uint16_t x, y, w, h; uint32_t len; };
@@ -82,7 +87,7 @@ struct TouchPoint { bool pressed; int x, y; };             // (types up here: Ar
 struct TouchScript { int64_t t0; int ms, x0, y0, x1, y1; };
 static TouchScript g_script = {0, 0, 0, 0, 0, 0};
 
-struct Stats { uint32_t updates, rects; uint64_t bytes, decode_us, ppa_us, recv_us; };
+struct Stats { uint32_t updates, rects, strips; uint64_t bytes, decode_us, ppa_us, recv_us; };
 static Stats g_stats = {};
 
 static int64_t now_ms() { return esp_timer_get_time() / 1000; }
@@ -204,6 +209,33 @@ static bool read_exact(uint8_t* p, size_t n) {
   return got == n;
 }
 
+// A strip: landscape columns x..x+w at full height, which are whole rows of the portrait frame buffer, so the JPEG
+// (rotated by the PC to suit g_rot) is decoded straight into place. That skips the PPA copy, which costs more than
+// decoding: PSRAM bandwidth is the limit, and the copy reads and writes every pixel once more.
+static bool handle_strip(const RectHeader& h) {
+  if (h.y != 0 || h.h != SCR_H || h.x % 16 || h.w % 16 || h.w == 0 || h.x + h.w > SCR_W || h.len == 0 || h.len > g_in_cap) {
+    Serial.printf("ERR bad strip %u %ux%u len %u\n", h.x, h.w, h.h, (unsigned)h.len);
+    return false;
+  }
+  const int64_t t0 = esp_timer_get_time();
+  if (!read_exact(g_in, h.len)) { Serial.println("ERR short read"); return false; }
+  const int64_t t1 = esp_timer_get_time();
+  const int row = g_rot == 1 ? h.x : SCR_W - h.x - h.w;   // first frame buffer row
+  jpeg_decode_cfg_t cfg = {};
+  cfg.output_format = JPEG_DECODE_OUT_FORMAT_RGB565;
+  cfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR;
+  cfg.conv_std = JPEG_YUV_RGB_CONV_STD_BT601;
+  uint32_t out_size = 0;
+  if (jpeg_decoder_process(g_jpeg, &cfg, g_in, h.len, (uint8_t*)(g_fb + (size_t)row * FB_W), (size_t)h.w * FB_W * 2,
+                           &out_size) != ESP_OK)
+    Serial.printf("ERR decode strip %u (%u bytes out)\n", h.w, (unsigned)out_size);
+  g_stats.strips++;
+  g_stats.bytes += h.len;
+  g_stats.recv_us += t1 - t0;
+  g_stats.decode_us += esp_timer_get_time() - t1;
+  return true;
+}
+
 // Receive and draw one rectangle (or the end marker). Returns false if the connection must be dropped.
 static bool handle_rect() {
   RectHeader h;
@@ -214,6 +246,7 @@ static bool handle_rect() {
     Serial.printf("PC: WiFi power save %s\n", g_power_mode ? "off" : "auto");
     return true;
   }
+  if (memcmp(h.magic, "TABS", 4) == 0) return handle_strip(h);
   if (memcmp(h.magic, "TAB5", 4) != 0) { Serial.println("ERR bad header"); return false; }
   if (h.w == 0 && h.h == 0) {   // end of update
     // continuous changes (an animation) arrive much faster under modem sleep's ~100 ms wake-ups if the radio stays on;
@@ -264,7 +297,7 @@ static void pc_poll() {
     g_have_client = true;
     g_pc_ip = (uint32_t)g_client.remoteIP();
     Serial.printf("PC connected from %s\n", g_client.remoteIP().toString().c_str());
-    send_event(EV_HELLO, 1, 1, 1, 0);   // version 1.1.0, can play sound
+    send_event(EV_HELLO, 1, 2, HELLO_SOUND | HELLO_STRIPS | (g_rot == 3 ? HELLO_FLIPPED : 0), 0);   // version 1.2.0
   }
   if (!g_have_client) return;
   if (!g_client.connected()) {
@@ -442,12 +475,12 @@ static void dump_framebuffer() {
 
 static void print_stats() {
   const Stats s = g_stats;
-  const uint32_t r = s.rects ? s.rects : 1;
+  const uint32_t r = s.rects + s.strips ? s.rects + s.strips : 1;
   const AudioStats a = g_astats;
-  Serial.printf("v%s | updates %u rects %u bytes %llu | per rect: recv %.1f ms decode %.1f ms ppa %.1f ms | wifi rssi %d sleep %s | "
-                "psram free %u\n",
-                FIRMWARE_VERSION, (unsigned)s.updates, (unsigned)s.rects, (unsigned long long)s.bytes, s.recv_us / 1000.0 / r,
-                s.decode_us / 1000.0 / r, s.ppa_us / 1000.0 / r, (int)WiFi.RSSI(), g_wifi_sleep ? "on" : "off",
+  Serial.printf("v%s | updates %u rects %u strips %u bytes %llu | per rect or strip: recv %.1f ms decode %.1f ms ppa %.1f ms | "
+                "wifi rssi %d sleep %s | psram free %u\n",
+                FIRMWARE_VERSION, (unsigned)s.updates, (unsigned)s.rects, (unsigned)s.strips, (unsigned long long)s.bytes,
+                s.recv_us / 1000.0 / r, s.decode_us / 1000.0 / r, s.ppa_us / (1000.0 * (s.rects ? s.rects : 1)), (int)WiFi.RSSI(), g_wifi_sleep ? "on" : "off",
                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
   Serial.printf("sound | packets %u late %u lost %u frames hold-ups %u | steering: dropped %u repeated %u | buffer %d ms "
                 "(target %d) | speaker %s vol %u\n",
@@ -562,5 +595,6 @@ void loop() {
   speaker_poll();
   set_wifi_sleep(g_power_mode == 0 && !g_panel_open && now_ms() - g_last_touch > AWAKE_AFTER_TOUCH_MS &&
                  now_ms() - g_last_stream > AWAKE_AFTER_STREAM_MS && !audio_recent(AWAKE_AFTER_SOUND_MS));
-  delay(5);
+  // while updates stream in, come back quickly for the next one; otherwise save power
+  delay(g_have_client && now_ms() - g_last_update < 500 ? 1 : 5);
 }

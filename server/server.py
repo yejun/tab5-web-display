@@ -40,16 +40,27 @@ import numpy as np
 from PIL import Image
 from playwright.async_api import async_playwright
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 W, H, TILE, PORT = 1280, 720, 16, 8765
 # Chromium's rasterisation jitters a few pixels by a few levels between frames. A tile counts as changed if some
 # pixel moved by more than NOISE, or if the whole tile shifted on average by more than DRIFT (a slow fade or gradient).
 NOISE, DRIFT = 6, 1.5
 SETTLE_S = 0.5   # after this long without changes, send whatever still differs at all (exact cleanup pass)
-RECT = struct.Struct("<4sHHHHI")   # "TAB5", x, y, w, h, jpeg length
+# Drawing cost on the Tab5 in ns per pixel (measured; PSRAM bandwidth is the limit): a rectangle is decoded and
+# then copied into the frame buffer by the PPA, a strip (full-height columns) is decoded straight into it.
+RECT_NS, STRIP_NS = 75, 27
+# Updates closer together than this are an animation. Its moving parts go out with half-resolution colour (4:2:0),
+# which the Tab5 draws ~40 % faster, and two updates may be in flight. A tile sent that way is sent again in full
+# colour (4:4:4) once it has stood still for SETTLE_S, so text ends up sharp even next to an endless animation.
+MOTION_S = 0.2
+SOFT_SHARE = 0.75     # a piece goes out in 4:2:0 only if this share of its tiles is moving
+SOFT_MIN = 48         # ... and is at least this big both ways: the Tab5's decoder times out on smaller 4:2:0 images
+TOUCH_QUIET_S = 0.5   # ... but only one in flight this soon after a touch, where delay matters more than frame rate
+RECT = struct.Struct("<4sHHHHI")   # "TAB5" (or "TABS", a strip), x, y, w, h, jpeg length
 EVENT = struct.Struct("<BBHHH")    # type, flags, x, y, z
 EV_DOWN, EV_MOVE, EV_UP, EV_SHOWN, EV_HELLO = 1, 2, 3, 5, 6
+HELLO_SOUND, HELLO_STRIPS, HELLO_FLIPPED = 1, 2, 4
 AUDIO = struct.Struct("<4sIHH")    # "TAUD", stream position of the first frame, frames, 0
 AUDIO_RATE, AUDIO_FRAMES = 48000, 360   # 7.5 ms of 16-bit stereo per datagram: 1440 bytes, one WiFi frame
 AUDIO_TAIL_S = 0.5                 # keep sending this long into silence, so a short pause doesn't restart the stream
@@ -94,11 +105,11 @@ def device_ip_from_serial(port):
     raise SystemExit(f"The Tab5 on {port} has no IP address yet; is it on WiFi? Or pass --device <ip>.")
 
 
-def dirty_rects(prev, cur, exact=False):
-    """Rectangles (x, y, w, h) covering every changed tile: one per run of changed tile rows, split where
-    a row run has a wide horizontal gap. All values are multiples of TILE."""
+def changed_tiles(prev, cur, exact=False):
+    """Which 16x16 tiles differ, as a (H/TILE, W/TILE) bool array: by more than the rendering noise, or with exact,
+    at all."""
     if prev is None:
-        return [(0, 0, W, H)]
+        return np.ones((H // TILE, W // TILE), bool)
     # per-pixel difference (largest of R, G, B) in uint8, then each tile's max and sum, one axis at a time:
     # about 2 ms per frame where widening to int16 and reducing two axes at once took 24 ms
     d = np.maximum(prev, cur)
@@ -106,28 +117,52 @@ def dirty_rects(prev, cur, exact=False):
     d = np.maximum(np.maximum(d[..., 0], d[..., 1]), d[..., 2]).reshape(H // TILE, TILE, W // TILE, TILE)
     peak = d.max(axis=1).max(axis=2)
     if exact:
-        tiles = peak > 0
-    else:
-        total = d.sum(axis=1, dtype=np.uint16).sum(axis=2, dtype=np.uint32)
-        tiles = (peak > NOISE) | (total > DRIFT * TILE * TILE)
-    rows = tiles.any(axis=1)
-    rects, r = [], 0
-    while r < len(rows):
-        if not rows[r]:
-            r += 1
-            continue
-        r0 = r
-        while r < len(rows) and rows[r]:
-            r += 1
-        cols = np.flatnonzero(tiles[r0:r].any(axis=0))
-        start = last = cols[0]
-        for c in list(cols[1:]) + [None]:
-            if c is None or c - last > 4:
-                rects.append((start * TILE, r0 * TILE, (last - start + 1) * TILE, (r - r0) * TILE))
-                start = c
-            if c is not None:
-                last = c
+        return peak > 0
+    total = d.sum(axis=1, dtype=np.uint16).sum(axis=2, dtype=np.uint32)
+    return (peak > NOISE) | (total > DRIFT * TILE * TILE)
+
+
+def runs(mask, gap=3):
+    """(start, end) of the runs of True in a 1-D mask, joining runs separated by at most gap False."""
+    idx = np.flatnonzero(mask)
+    out = []
+    for i in idx:
+        if out and i - out[-1][1] <= gap:
+            out[-1][1] = i + 1
+        else:
+            out.append([i, i + 1])
+    return [tuple(r) for r in out]
+
+
+def dirty_rects(tiles):
+    """Rectangles (x, y, w, h) covering the changed tiles: one per run of changed tile rows, split where a row run
+    has a wide horizontal gap. All values are multiples of TILE, and widths at least 2 * TILE: the Tab5's JPEG
+    decoder garbles some images only 16 pixels wide (every other line, depending on the content)."""
+    rects = []
+    for r0, r1 in runs(tiles.any(axis=1), gap=0):
+        for c0, c1 in runs(tiles[r0:r1].any(axis=0)):
+            x, w = c0 * TILE, (c1 - c0) * TILE
+            if w < 2 * TILE:
+                x, w = min(x, W - 2 * TILE), 2 * TILE
+            rects.append((x, r0 * TILE, w, (r1 - r0) * TILE))
     return rects
+
+
+def plan(tiles, strips):
+    """What to send for the changed tiles: ("rect", x, y, w, h) and, if the Tab5 takes them, ("strip", x, 0, w, H)
+    for column ranges where redrawing the full height straight into the frame buffer is cheaper."""
+    rects = dirty_rects(tiles)
+    if not strips:
+        return [("rect", *r) for r in rects]
+    out = []
+    for c0, c1 in runs(tiles.any(axis=0)):
+        x0, x1 = c0 * TILE, c1 * TILE
+        group = [r for r in rects if x0 <= r[0] < x1]
+        if (x1 - x0) * H * STRIP_NS < sum(w * h for _, _, w, h in group) * RECT_NS:
+            out.append(("strip", x0, 0, x1 - x0, H))
+        else:
+            out += [("rect", *r) for r in group]
+    return out
 
 
 # The P4's JPEG decoder expands "TV range" BT.601 YCbCr (Y 16-235, Cb/Cr 16-240) to RGB, while JPEG writers use
@@ -136,12 +171,22 @@ def dirty_rects(prev, cur, exact=False):
 TV_RANGE = [round(16 + v * 219 / 255) for v in range(256)] + [round(128 + (v - 128) * 224 / 255) for v in range(256)] * 2
 
 
-def encode(img, rect, quality):
-    x, y, w, h = rect
-    ycc = Image.fromarray(img[y:y + h, x:x + w]).convert("YCbCr").point(TV_RANGE)
+def encode(pixels, quality, subsampling):
+    ycc = Image.fromarray(np.ascontiguousarray(pixels)).convert("YCbCr").point(TV_RANGE)
     buf = io.BytesIO()
-    ycc.save(buf, "JPEG", quality=quality, subsampling=0)
+    ycc.save(buf, "JPEG", quality=quality, subsampling=subsampling)
     return buf.getvalue()
+
+
+def piece_pixels(img, piece, flipped):
+    """The pixels to encode for a plan() piece. A strip is turned into the panel's portrait orientation, so the
+    Tab5 can decode it straight into its frame buffer: logical (x, y) is panel (719 - y, x), or (y, 1279 - x)
+    when the screen is flipped."""
+    kind, x, y, w, h = piece
+    if kind == "rect":
+        return img[y:y + h, x:x + w]
+    cols = img[:, x:x + w].transpose(1, 0, 2)
+    return cols[::-1] if flipped else img[::-1, x:x + w].transpose(1, 0, 2)
 
 
 class SystemAudio:
@@ -224,10 +269,12 @@ class Mirror:
         self.writer = None
         self.dirty = asyncio.Event()
         self.touch_at = None          # when the last touch event arrived, for the touch -> shown latency
-        self.touch_in_flight = None   # that time, once an update showing its effect has been sent
         self.latest = None            # newest screencast frame (base64 PNG) not yet decoded
         self.frame = None             # newest decoded frame: what the page looks like now
-        self.sent_at, self.show_times = 0.0, []   # send -> shown round trips, for the stats
+        self.in_flight = collections.deque()   # (sent at, touch time or None) of updates not yet shown
+        self.acked = asyncio.Event()
+        self.show_times = []                   # send -> shown round trips, for the stats
+        self.strips = self.flipped = False     # from the Tab5's hello
         self.stats_task = None
         self.live, self.host = False, None   # live: the Tab5 is showing our updates
         self.touches, self.touch_wake = collections.deque(), asyncio.Event()   # touches waiting for the page
@@ -282,7 +329,7 @@ class Mirror:
             while self.touches:
                 await self.touch(*self.touches.popleft())
 
-    async def read_events(self, reader, shown):
+    async def read_events(self, reader):
         while True:
             kind, flags, x, y, _ = EVENT.unpack(await reader.readexactly(EVENT.size))
             if kind == EV_SHOWN:
@@ -291,29 +338,33 @@ class Mirror:
                     sound = ("with sound" if self.audio.target else "no sound: the Tab5 firmware is older than 1.1") \
                         if self.audio else "no sound"
                     print(f"showing on Tab5 {self.host}:{PORT} ({sound})")
-                shown.set()
-                self.show_times.append(time.monotonic() - self.sent_at)
-                if self.touch_in_flight is not None:
-                    print(f"touch->shown {1000 * (time.monotonic() - self.touch_in_flight):4.0f} ms")
-                    self.touch_in_flight = None
+                if self.in_flight:
+                    sent_at, touch_t = self.in_flight.popleft()
+                    now = time.monotonic()
+                    self.show_times.append(now - sent_at)
+                    if touch_t is not None:
+                        print(f"touch->shown {1000 * (now - touch_t):4.0f} ms")
+                self.acked.set()
             elif kind in (EV_DOWN, EV_MOVE, EV_UP):
                 self.queue_touch(kind, x, y)
             elif kind == EV_HELLO:   # firmware 1.1 or later: it takes settings and can play sound
                 self.writer.write(RECT.pack(b"TCFG", POWER_SAVE[self.args.power_save], 0, 0, 0, 0))
-                if self.audio and flags & 1:
+                if self.audio and flags & HELLO_SOUND:
                     self.audio.target = (self.host, PORT)
+                self.strips, self.flipped = bool(flags & HELLO_STRIPS), bool(flags & HELLO_FLIPPED)
 
     async def session(self, host):
         self.host = host
         reader, writer = await asyncio.open_connection(host, PORT)
         self.writer = writer
-        shown = asyncio.Event()
-        shown.set()
-        self.touch_in_flight = None
+        self.in_flight.clear()
         self.touches.clear()
-        events = asyncio.create_task(self.read_events(reader, shown))
+        self.strips = self.flipped = False
+        events = asyncio.create_task(self.read_events(reader))
         toucher = asyncio.create_task(self.dispatch_touches())
-        prev, last_start, needs_settle = None, 0.0, False
+        prev, last_start, last_sent, needs_settle = None, 0.0, 0.0, False
+        soft = np.zeros((H // TILE, W // TILE), bool)   # tiles last sent in half-resolution colour
+        changed_at = np.zeros((H // TILE, W // TILE))      # when each tile last changed
         stats, stats_t = [], time.monotonic()
         try:
             while not events.done():
@@ -324,42 +375,62 @@ class Mirror:
                     settle, needs_settle = needs_settle, False
                 self.dirty.clear()
                 await asyncio.sleep(max(0.0, last_start + 1 / self.args.max_fps - time.monotonic()))
-                # capture and encode while the previous update may still be on its way to the panel (pipelining);
-                # prev already includes that update, so the diff is against what the Tab5 is about to show
+                # capture and encode while earlier updates may still be on their way to the panel (pipelining);
+                # prev already includes them, so the diff is against what the Tab5 is about to show
                 t0 = last_start = time.monotonic()
                 touch_t = self.touch_at if self.touch_at is not None and self.touch_at < t0 else None
+                moving = not settle and t0 - last_sent < MOTION_S
                 cur = await self.capture()
                 t1 = time.monotonic()
                 q = min(95, self.args.quality + 5) if settle else self.args.quality
 
                 def diff_and_encode():   # in a worker thread, so touches, acks and sound keep flowing meanwhile
-                    rects = dirty_rects(prev, cur, exact=settle)
+                    tiles = changed_tiles(prev, cur, exact=settle)
+                    changed_at[tiles] = t0
+                    still = soft & ~tiles & (t0 - changed_at >= SETTLE_S)   # blurry and no longer moving: sharpen
+                    pieces = []   # (piece, subsampling)
+                    for piece in plan(tiles | soft if settle else tiles, self.strips):
+                        _, x, y, w, h = piece
+                        share = tiles[y // TILE:(y + h) // TILE, x // TILE:(x + w) // TILE].mean()
+                        soft_ok = moving and share >= SOFT_SHARE and min(w, h) >= SOFT_MIN
+                        pieces.append((piece, 2 if soft_ok else 0))
+                    if not settle:
+                        pieces += [(piece, 0) for piece in plan(still, self.strips)]
                     out = bytearray()
-                    for r in rects:
-                        jpg = encode(cur, r, q)
-                        out += RECT.pack(b"TAB5", *r, len(jpg)) + jpg
-                    return rects, out
-                rects, out = await asyncio.to_thread(diff_and_encode)
+                    for piece, sub in pieces:
+                        jpg = encode(piece_pixels(cur, piece, self.flipped), q, sub)
+                        out += RECT.pack(b"TABS" if piece[0] == "strip" else b"TAB5", *piece[1:], len(jpg)) + jpg
+                    return pieces, out
+                pieces, out = await asyncio.to_thread(diff_and_encode)
                 t2 = time.monotonic()
-                if rects:
+                if pieces:
                     out += RECT.pack(b"TAB5", 0, 0, 0, 0, 0)
-                    await asyncio.wait_for(shown.wait(), 5.0)   # at most one update in flight
-                    shown.clear()
+                    # at most one update in flight, or two during an animation (not right after a touch)
+                    quiet = self.touch_at is None or t0 - self.touch_at > TOUCH_QUIET_S
+                    limit = 2 if moving and quiet else 1
+                    while len(self.in_flight) >= limit:
+                        self.acked.clear()
+                        await asyncio.wait_for(self.acked.wait(), 5.0)
                     if touch_t is not None:
-                        self.touch_in_flight, self.touch_at = touch_t, None
-                    self.sent_at = time.monotonic()
+                        self.touch_at = None
+                    self.in_flight.append((time.monotonic(), touch_t))
                     writer.write(out)
                     await asyncio.wait_for(writer.drain(), 5.0)
+                    last_sent = t0
                     # remember only what the Tab5 now shows, so sub-threshold drift still adds up and gets sent
                     if prev is None:
                         prev = cur.copy()
-                    for x, y, w, h in rects:
+                    for (_, x, y, w, h), sub in pieces:   # in order: a later piece may redraw part of an earlier one
                         prev[y:y + h, x:x + w] = cur[y:y + h, x:x + w]
+                        soft[y // TILE:(y + h) // TILE, x // TILE:(x + w) // TILE] = sub != 0
                     needs_settle = not settle
-                    stats.append((len(out), sum(w * h for _, _, w, h in rects), t1 - t0, t2 - t1))
+                    stats.append((len(out), sum(w * h for (*_, w, h), _ in pieces), t1 - t0, t2 - t1))
                     if self.args.verbose:
-                        print(f"{len(rects)} rect(s) {len(out) / 1024:6.1f} KB | decode {1000 * (t1 - t0):3.0f} ms "
-                              f"diff+encode {1000 * (t2 - t1):3.0f} ms " + " ".join(f"{x},{y},{w}x{h}" for x, y, w, h in rects))
+                        n_strips = sum(p[0] == "strip" for p, _ in pieces)
+                        n_soft = sum(sub != 0 for _, sub in pieces)
+                        print(f"{len(pieces) - n_strips} rect(s) {n_strips} strip(s), {n_soft} in 4:2:0 "
+                              f"{len(out) / 1024:6.1f} KB | decode {1000 * (t1 - t0):3.0f} ms "
+                              f"diff+encode {1000 * (t2 - t1):3.0f} ms in flight {len(self.in_flight)}")
                 elif touch_t is not None and t0 - touch_t > 1.0:
                     self.touch_at = None   # the touch changed nothing visible
                 if (now := time.monotonic()) - stats_t >= 1.0:
@@ -434,7 +505,7 @@ async def main():
                     help="Tab5 WiFi power save. auto (default): off only while you touch, the page animates or sound "
                          "plays; off: always off, for the quickest response but shorter battery life")
     ap.add_argument("--quality", type=int, default=88, help="JPEG quality (default 88)")
-    ap.add_argument("--max-fps", type=float, default=30, help="cap on updates per second (default 30)")
+    ap.add_argument("--max-fps", type=float, default=60, help="cap on updates per second (default 60)")
     ap.add_argument("--browser", default=find_browser(), help="Chromium/Chrome executable (default: found on PATH)")
     ap.add_argument("--show", action="store_true", help="show the browser window too (for debugging)")
     ap.add_argument("-v", "--verbose", action="store_true")

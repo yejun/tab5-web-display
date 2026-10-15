@@ -4,7 +4,7 @@ Turn an [M5Stack Tab5](https://docs.m5stack.com/en/core/Tab5) into a touch scree
 server renders a page in headless Chromium on your PC, sends what changed to the Tab5 over WiFi, and passes your
 taps and drags back to the page. Several ready-made apps are included, and you can show any URL or local HTML file.
 
-Version 1.1.0 · MIT licence
+Version 1.2.0 · MIT licence
 
 ![Home launcher on the Tab5](docs/home.png)
 
@@ -23,9 +23,10 @@ Version 1.1.0 · MIT licence
   real browser on the PC.
 - **Fast and light on the Tab5.**
   - **Only the 16×16 tiles that changed are sent.** An idle page with a ticking clock costs about 1.4 KB a second.
-  - **The Tab5 barely works.** Its hardware JPEG decoder and image processor (PPA) put each update on screen in
-    about 1–2 ms.
-  - **Responsive.** A tap shows its result in about 80–150 ms, and animations run at 15–28 fps.
+  - **The Tab5 barely works.** Its hardware JPEG decoder does the drawing, large changes straight into the
+    frame buffer.
+  - **Smooth.** Small animations run at up to 58 fps and full-screen ones at about 30; a finger-follow test shows
+    a touch on screen in about 20–40 ms.
 - **Sound.** What the page plays comes out of the Tab5's speaker or headphone jack, about a tenth of a second
   behind the PC, the same as the picture. Needs a Linux PC with PulseAudio or PipeWire.
 - **Built-in apps that need no API keys:** a home launcher, a dashboard, a clock with calendar, sticky notes, a
@@ -117,7 +118,7 @@ python3 -m venv .venv
 | `--no-audio` | don't send the page's sound |
 | `--power-save auto\|off` | Tab5 WiFi power save. `auto` (default): off only while you touch, the page animates or sound plays. `off`: always off, for the quickest response but shorter battery life |
 | `--quality N` | JPEG quality, default 88 |
-| `--max-fps N` | cap on updates per second, default 30 |
+| `--max-fps N` | cap on updates per second, default 60 |
 | `--show` | also open a visible browser window |
 | `-v` | log every update |
 | `--version` | print the version |
@@ -159,14 +160,21 @@ PC: server/server.py                                    Tab5: firmware/web_displ
 
 **On the PC:**
 - **Frames:** Chromium streams a lossless frame whenever it repaints. The server compares it with what the Tab5
-  shows, groups the changed tiles into rectangles, and encodes each as baseline JPEG with full-resolution colour
-  (4:4:4), so text stays sharp.
-- **Pipelining:** the next frame is prepared while the previous one is still on its way. The Tab5 acknowledges each
-  update once it is on screen, so there is never more than one update in flight.
+  shows and finds the changed 16×16 tiles.
+- **Rectangles or strips:** small changes go out as tight rectangles. Large ones go out as full-height strips,
+  already rotated into the panel's orientation, which the Tab5 decodes straight into its frame buffer. The server
+  picks whichever the Tab5 draws faster.
+- **Colour:** pieces are baseline JPEG with full-resolution colour (4:4:4), so text stays sharp. Moving parts of an
+  animation use half-resolution colour (4:2:0), which the Tab5 draws about 40 % faster; each such tile is sent
+  again in full colour once it has stood still for 0.5 s.
+- **Pipelining:** the next frame is prepared while earlier ones are still on their way. The Tab5 acknowledges each
+  update once it is on screen. One update is in flight at a time, or two during an animation (not right after a
+  touch, where delay matters more).
 
 **On the Tab5:**
-- **Drawing:** each rectangle is decoded by the ESP32-P4's hardware JPEG engine, then rotated into the panel's
-  portrait frame buffer by the PPA. Both use DMA, so the CPU only waits.
+- **Drawing:** the ESP32-P4's hardware JPEG engine decodes a strip straight into the panel's portrait frame
+  buffer. A rectangle is decoded to a buffer and then rotated into place by the PPA. Both use DMA, so the CPU only
+  waits.
 - **Touch:** touches go back to the PC as touch events.
 - **WiFi power save** turns off for 10 s after a touch, while updates stream in and while sound plays, so replies
   arrive quickly. Otherwise it stays on. `--power-save off` keeps it off.
@@ -185,15 +193,21 @@ PC: server/server.py                                    Tab5: firmware/web_displ
 
 | scene | changed area | Tab5 fps | data |
 |---|---|---|---|
-| spinner | ~4% | 22–28 | ~130 KB/s |
-| bouncing balls | 15–20% | 24–27 | ~500 KB/s |
-| full-screen animation | 40–60% | 15–17 | ~600 KB/s |
+| spinner | ~4% | 56–58 | ~300 KB/s |
+| follow finger, while dragging | <1% | ~55 | ~110 KB/s |
+| bouncing balls | 20–35% | 51–54 | ~1.2 MB/s |
+| full-screen animation | 75–90% | 28–34 | ~1.9 MB/s |
 
 **Details worth knowing:**
 - **Colour range.** The P4's JPEG decoder expects "TV range" YCbCr (Y 16–235), but JPEG files use the full 0–255
   range. Decoded as-is, dark greys would be crushed to black, so the server converts to TV range before encoding.
 - **Rendering noise.** Chromium's rasterisation jitters by a few levels between frames, so that is ignored. Once
   nothing has changed for 0.5 s, an exact cleanup pass sends whatever still differs.
+- **PSRAM is the limit.** Copying a full screen into the frame buffer takes the PPA 45 ms and the CPU 28 ms, while
+  the display controller reads the same memory 60 times a second. Decoding large changes straight into the frame
+  buffer skips that copy, which more than doubled the full-screen frame rate.
+- **Decoder quirks.** The Tab5's JPEG decoder garbles some images only 16 pixels wide and times out on 4:2:0
+  images smaller than 48 pixels, so the server sends neither.
 - **Why not H.264?** The P4 can only decode H.264 in software, at roughly 4 fps for 720p. A mostly static page
   gains nothing from video compression.
 
