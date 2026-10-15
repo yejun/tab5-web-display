@@ -123,7 +123,7 @@ python3 -m venv .venv
 | `--browser PATH` | Chromium or Chrome executable (default: found on `PATH`) |
 | `--no-audio` | don't send the page's sound |
 | `--power-save auto\|off` | Tab5 WiFi power save. `auto` (default): off only while you touch, the page animates or sound plays. `off`: always off, for the quickest response but shorter battery life |
-| `--quality N` | JPEG quality, default 88 |
+| `--quality N` | JPEG quality once the page is still, default 95 (moving parts are sent rougher first) |
 | `--max-fps N` | cap on updates per second, default 60 |
 | `--show` | also open a visible browser window |
 | `-v` | log every update |
@@ -170,9 +170,12 @@ PC: server/server.py                                    Tab5: firmware/web_displ
 - **Rectangles or strips:** small changes go out as tight rectangles. Large ones go out as full-height strips,
   already rotated into the panel's orientation, which the Tab5 decodes straight into its frame buffer. The server
   picks whichever the Tab5 draws faster.
-- **Colour:** pieces are baseline JPEG with full-resolution colour (4:4:4), so text stays sharp. Moving parts of an
-  animation use half-resolution colour (4:2:0), which the Tab5 draws about 40 % faster; each such tile is sent
-  again in full colour once it has stood still for 0.5 s.
+- **Quality:** pieces are baseline JPEG. Still content goes out at quality 95 with full-resolution colour (4:4:4),
+  so text stays sharp. During an animation, mostly-moving pieces go out rough: quality 70 (85 for small changes)
+  with half-resolution colour (4:2:0), which the Tab5 draws about 40 % faster; other pieces at quality 88. Every
+  tile sent below the top quality is sent again at quality 95 once it has stood still for 0.5 s, the oldest first
+  and a tenth of the screen per update while something else still moves. So a page at rest is always at top
+  quality.
 - **Pipelining:** the next frame is prepared while earlier ones are still on their way. The Tab5 acknowledges each
   update once it is on screen. One update is in flight at a time, or two during an animation (not right after a
   touch, where delay matters more).

@@ -50,12 +50,22 @@ SETTLE_S = 0.5   # after this long without changes, send whatever still differs 
 # Drawing cost on the Tab5 in ns per pixel (measured; PSRAM bandwidth is the limit): a rectangle is decoded and
 # then copied into the frame buffer by the PPA, a strip (full-height columns) is decoded straight into it.
 RECT_NS, STRIP_NS = 75, 27
-# Updates closer together than this are an animation. Its moving parts go out with half-resolution colour (4:2:0),
-# which the Tab5 draws ~40 % faster, and two updates may be in flight. A tile sent that way is sent again in full
-# colour (4:4:4) once it has stood still for SETTLE_S, so text ends up sharp even next to an endless animation.
+# Updates closer together than this are an animation, and two of them may be in flight. Its pieces go out below
+# the top quality (--quality): mostly-moving ones rough (lower quality and half-resolution colour, 4:2:0, which the
+# Tab5 draws ~40 % faster), the rest at MOTION_Q_MID in full colour (they may hold still text, such as the page
+# around a playing video). Tiles sent below the top quality are refined, sent again at the top quality in full
+# colour, once they have neither changed nor been resent for SETTLE_S: the oldest first, at most REFINE_TILES per
+# update while something else still moves, all at once when the screen is still. So a page that has come to rest is
+# always at top quality, even next to an endless animation.
+# Measured: on the RGB565 panel, q95 leaves ~0.05 % of pixels visibly off on text-heavy pages, q88 ~0.6 %, q70 ~8 %;
+# lower quality saves data (q70: ~20 % less than q88) but hardly any drawing time.
 MOTION_S = 0.2
-SOFT_SHARE = 0.75     # a piece goes out in 4:2:0 only if this share of its tiles is moving
-SOFT_MIN = 48         # ... and is at least this big both ways: the Tab5's decoder times out on smaller 4:2:0 images
+ROUGH_SHARE = 0.75    # a piece goes out rough only if this share of its tiles is moving
+BIG_MOTION = 0.10     # moving parts at MOTION_Q_BIG when this share of the screen changes, else MOTION_Q_SMALL,
+MOTION_Q_BIG, MOTION_Q_SMALL = 70, 85   # where artifacts on small UI elements would show more
+MOTION_Q_MID = 88
+REFINE_TILES = (H // TILE) * (W // TILE) // 10
+SOFT_MIN = 48         # 4:2:0 only for pieces this big both ways: the Tab5's decoder times out on smaller 4:2:0 images
 TOUCH_QUIET_S = 0.5   # ... but only one in flight this soon after a touch, where delay matters more than frame rate
 RECT = struct.Struct("<4sHHHHI")   # "TAB5" (or "TABS", a strip), x, y, w, h, jpeg length
 EVENT = struct.Struct("<BBHHH")    # type, flags, x, y, z
@@ -379,7 +389,8 @@ class Mirror:
         events = asyncio.create_task(self.read_events(reader))
         toucher = asyncio.create_task(self.dispatch_touches())
         prev, last_start, last_sent, needs_settle = None, 0.0, 0.0, False
-        soft = np.zeros((H // TILE, W // TILE), bool)   # tiles last sent in half-resolution colour
+        rough = np.zeros((H // TILE, W // TILE), bool)  # tiles last sent below the top quality
+        rough_at = np.zeros((H // TILE, W // TILE))        # when each was last sent below the top quality
         changed_at = np.zeros((H // TILE, W // TILE))      # when each tile last changed
         stats, stats_t = [], time.monotonic()
         try:
@@ -398,22 +409,32 @@ class Mirror:
                 moving = not settle and t0 - last_sent < MOTION_S
                 cur = await self.capture()
                 t1 = time.monotonic()
-                q = min(95, self.args.quality + 5) if settle else self.args.quality
+                top = self.args.quality
 
                 def diff_and_encode():   # in a worker thread, so touches, acks and sound keep flowing meanwhile
                     tiles = changed_tiles(prev, cur, exact=settle)
                     changed_at[tiles] = t0
-                    still = soft & ~tiles & (t0 - changed_at >= SETTLE_S)   # blurry and no longer moving: sharpen
-                    pieces = []   # (piece, subsampling)
-                    for piece in plan(tiles | soft if settle else tiles, self.strips):
+                    motion_q = min(top, MOTION_Q_BIG if tiles.mean() >= BIG_MOTION else MOTION_Q_SMALL)
+                    pieces = []   # (piece, quality, subsampling)
+                    for piece in plan(tiles | rough if settle else tiles, self.strips):
                         _, x, y, w, h = piece
                         share = tiles[y // TILE:(y + h) // TILE, x // TILE:(x + w) // TILE].mean()
-                        soft_ok = moving and share >= SOFT_SHARE and min(w, h) >= SOFT_MIN
-                        pieces.append((piece, 2 if soft_ok else 0))
-                    if not settle:
-                        pieces += [(piece, 0) for piece in plan(still, self.strips)]
+                        if not moving:
+                            pieces.append((piece, top, 0))
+                        elif share >= ROUGH_SHARE:
+                            pieces.append((piece, motion_q, 2 if min(w, h) >= SOFT_MIN else 0))
+                        else:
+                            pieces.append((piece, min(top, MOTION_Q_MID), 0))
+                    if not settle:   # refine tiles that have stood still and not been resent, the oldest first
+                        still = rough & ~tiles & (t0 - changed_at >= SETTLE_S) & (t0 - rough_at >= SETTLE_S)
+                        if still.sum() > REFINE_TILES:
+                            ys, xs = np.nonzero(still)
+                            oldest = np.argsort(changed_at[ys, xs], kind="stable")[:REFINE_TILES]
+                            still = np.zeros_like(still)
+                            still[ys[oldest], xs[oldest]] = True
+                        pieces += [(piece, top, 0) for piece in plan(still, self.strips)]
                     out = bytearray()
-                    for piece, sub in pieces:
+                    for piece, q, sub in pieces:
                         jpg = encode(piece_pixels(cur, piece, self.flipped), q, sub)
                         out += RECT.pack(b"TABS" if piece[0] == "strip" else b"TAB5", *piece[1:], len(jpg)) + jpg
                     return pieces, out
@@ -436,15 +457,19 @@ class Mirror:
                     # remember only what the Tab5 now shows, so sub-threshold drift still adds up and gets sent
                     if prev is None:
                         prev = cur.copy()
-                    for (_, x, y, w, h), sub in pieces:   # in order: a later piece may redraw part of an earlier one
+                    for (_, x, y, w, h), q, sub in pieces:   # in order: a later piece may redraw part of an earlier one
                         prev[y:y + h, x:x + w] = cur[y:y + h, x:x + w]
-                        soft[y // TILE:(y + h) // TILE, x // TILE:(x + w) // TILE] = sub != 0
-                    needs_settle = not settle
-                    stats.append((len(out), sum(w * h for (*_, w, h), _ in pieces), t1 - t0, t2 - t1))
+                        area = np.s_[y // TILE:(y + h) // TILE, x // TILE:(x + w) // TILE]
+                        rough[area] = q < top or sub != 0
+                        if rough[area].any():
+                            rough_at[area] = t0
+                    needs_settle = not settle or rough.any()
+                    stats.append((len(out), sum(w * h for (*_, w, h), _, _ in pieces), t1 - t0, t2 - t1))
                     if self.args.verbose:
-                        n_strips = sum(p[0] == "strip" for p, _ in pieces)
-                        n_soft = sum(sub != 0 for _, sub in pieces)
-                        print(f"{len(pieces) - n_strips} rect(s) {n_strips} strip(s), {n_soft} in 4:2:0 "
+                        n_strips = sum(p[0] == "strip" for p, _, _ in pieces)
+                        n_rough = sum(q < top or sub != 0 for _, q, sub in pieces)
+                        print(f"{len(pieces) - n_strips} rect(s) {n_strips} strip(s), {n_rough} rough, "
+                              f"{rough.sum()} rough tiles left "
                               f"{len(out) / 1024:6.1f} KB | decode {1000 * (t1 - t0):3.0f} ms "
                               f"diff+encode {1000 * (t2 - t1):3.0f} ms in flight {len(self.in_flight)}")
                 elif touch_t is not None and t0 - touch_t > 1.0:
@@ -520,7 +545,8 @@ async def main():
     ap.add_argument("--power-save", choices=list(POWER_SAVE), default="auto",
                     help="Tab5 WiFi power save. auto (default): off only while you touch, the page animates or sound "
                          "plays; off: always off, for the quickest response but shorter battery life")
-    ap.add_argument("--quality", type=int, default=88, help="JPEG quality (default 88)")
+    ap.add_argument("--quality", type=int, default=95,
+                    help="JPEG quality once the page is still (default 95); moving parts are sent rougher first")
     ap.add_argument("--max-fps", type=float, default=60, help="cap on updates per second (default 60)")
     ap.add_argument("--browser", default=find_browser(), help="Chromium/Chrome executable (default: found on PATH)")
     ap.add_argument("--show", action="store_true", help="show the browser window too (for debugging)")

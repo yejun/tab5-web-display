@@ -3,6 +3,15 @@
 Versions follow [semantic versioning](https://semver.org). The firmware prints its version at boot, in the serial
 `S` statistics and in its settings panel; the server prints it at start and with `--version`.
 
+## Unreleased
+
+- **Dynamic quality.** Still content now goes out at JPEG quality 95 (was 88): on the Tab5's 16-bit panel that
+  leaves about 0.05 % of pixels on text-heavy pages visibly off, against about 0.6 %. During animations,
+  mostly-moving parts go out at quality 70 (85 for small changes) with half-resolution colour, other parts at 88.
+  Every tile sent below the top quality is refined to 95 once it has stood still for 0.5 s, the oldest first and
+  at most a tenth of the screen per update while something else moves. Frame rates are unchanged; data during
+  animations is about 7 % higher, for the refinement. `--quality` now sets the top quality (default 95).
+
 ## 1.2.1 - 2026-10-14
 
 Server only; use it with firmware 1.2.0.
