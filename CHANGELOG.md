@@ -3,7 +3,9 @@
 Versions follow [semantic versioning](https://semver.org). The firmware prints its version at boot, in the serial
 `S` statistics and in its settings panel; the server prints it at start and with `--version`.
 
-## Unreleased
+## 1.2.1 - 2026-10-14
+
+Server only; use it with firmware 1.2.0.
 
 - **Fix: YouTube stopped after a minute or so** with "Something went wrong". It treated the headless browser as a
   bot, from its "HeadlessChrome" user agent and `navigator.webdriver`. The browser now presents itself like a

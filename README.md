@@ -4,7 +4,7 @@ Turn an [M5Stack Tab5](https://docs.m5stack.com/en/core/Tab5) into a touch scree
 server renders a page in headless Chromium on your PC, sends what changed to the Tab5 over WiFi, and passes your
 taps and drags back to the page. Several ready-made apps are included, and you can show any URL or local HTML file.
 
-Version 1.2.0 · MIT licence
+Version 1.2.1 (firmware 1.2.0) · MIT licence
 
 ![Home launcher on the Tab5](docs/home.png)
 
