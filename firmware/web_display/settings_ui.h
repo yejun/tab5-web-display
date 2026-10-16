@@ -1,4 +1,4 @@
-// Settings panel (LVGL): WiFi network list and password entry, connection status, brightness, volume, flip.
+// Settings panel (LVGL): WiFi network list and password entry, connection status, battery, brightness, volume, flip.
 // Included by web_display.ino after the WiFi and display helpers. LVGL only runs while the panel is open; its
 // strips are rotated into the frame buffer by the PPA like the page rectangles. While the panel is open the PC
 // connection is refused; the PC reconnects within 2 s of closing and sends a full frame.
@@ -15,7 +15,7 @@ static int g_net_count = 0;
 static lv_display_t* g_disp;
 static lv_obj_t *ui_wifi, *ui_addr, *ui_pc, *ui_hint, *ui_list, *ui_scan_btn, *ui_scan_lbl;
 static lv_obj_t *ui_modal, *ui_modal_title, *ui_ta_ssid, *ui_ta_pass, *ui_show_btn, *ui_msg, *ui_spinner, *ui_kb;
-static lv_obj_t *ui_connect_btn, *ui_bri, *ui_vol, *ui_flip;
+static lv_obj_t *ui_connect_btn, *ui_bri, *ui_vol, *ui_flip, *ui_batt;
 static bool g_scanning = false, g_connect_pending = false, g_touch_block = false;
 static String g_pending_ssid;   // the network the dialog is joining
 
@@ -97,6 +97,11 @@ static void ui_refresh_status() {
     lv_label_set_text(ui_hint, "Connect to WiFi, then run server/server.py on the PC.");
   }
   lv_label_set_text(ui_pc, g_wifi != WIFI_UP ? "-" : "Paused while settings are open");
+  char batt[128];
+  battery_text(batt, sizeof(batt));
+  if (strcmp(lv_label_get_text(ui_batt), batt)) lv_label_set_text(ui_batt, batt);
+  const bool low = g_batt.presence.state == BatteryPresence::Present && g_batt.level <= 15 && !g_batt.external;
+  lv_obj_set_style_text_color(ui_batt, lv_color_hex(low ? C_WARN : C_INK), 0);
 }
 
 // ---- network list -------------------------------------------------------------------------------------------
@@ -404,6 +409,10 @@ static void ui_setup() {
   lv_obj_t* sub = ui_label(scr, "", &lv_font_montserrat_20, C_DIM);
   lv_label_set_text_fmt(sub, "Tab5 Web Display %s", FIRMWARE_VERSION);
   lv_obj_set_pos(sub, 180, 34);
+  ui_batt = ui_label(scr, "", &lv_font_montserrat_20, C_INK);   // top right, like a status bar
+  lv_obj_set_width(ui_batt, 782);
+  lv_obj_set_style_text_align(ui_batt, LV_TEXT_ALIGN_RIGHT, 0);
+  lv_obj_set_pos(ui_batt, 466, 34);
 
   // status
   lv_obj_t* st = ui_card(scr, 32, 80, 410, 300);
@@ -466,7 +475,7 @@ static void ui_setup() {
   lv_obj_set_style_text_font(lv_obj_get_child(done, 0), &lv_font_montserrat_28, 0);
 
   // networks
-  lv_obj_t* nc = ui_card(scr, 466, 24, 782, 664);
+  lv_obj_t* nc = ui_card(scr, 466, 80, 782, 608);
   lv_obj_t* nt = ui_label(nc, "Wi-Fi networks", &lv_font_montserrat_28, C_INK);
   lv_obj_set_pos(nt, 0, 4);
   ui_scan_lbl = ui_label(nc, "", &lv_font_montserrat_20, C_DIM);
@@ -476,7 +485,7 @@ static void ui_setup() {
   lv_obj_align(ui_scan_btn, LV_ALIGN_TOP_RIGHT, 0, 0);
   ui_list = lv_list_create(nc);
   lv_obj_set_pos(ui_list, 0, 86);
-  lv_obj_set_size(ui_list, 738, 532);
+  lv_obj_set_size(ui_list, 738, 476);
   lv_obj_set_style_bg_color(ui_list, lv_color_hex(C_CARD), 0);
   lv_obj_set_style_border_width(ui_list, 0, 0);
   lv_obj_set_style_pad_all(ui_list, 0, 0);

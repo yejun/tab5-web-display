@@ -3,6 +3,38 @@
 Versions follow [semantic versioning](https://semver.org). The firmware prints its version at boot, in the serial
 `S` statistics and in its settings panel; the server prints it at start and with `--version`.
 
+## Unreleased
+
+- **Videos:** `--file clip.mp4` plays any video ffmpeg can decode, in a loop and with sound (no PulseAudio needed).
+  Tap to pause, drag sideways to seek (across the screen is 2 minutes; on the bar, the position follows the
+  finger). A bar at the bottom shows the time, length and file name while paused or seeking and for 3 s after a
+  touch. ffmpeg decodes the picture and the sound; the server keeps the clock and feeds the frames through the
+  usual tile pipeline. The quality of moving frames adapts to the measured WiFi rate: detailed 720p footage plays
+  at 26–29 fps (it was 18–19 at a fixed quality 70), simple footage at 30. Playback pauses while the Tab5 is
+  disconnected (e.g. settings open).
+- **Chrome and Edge found on Windows and macOS:** the server looks in their usual install folders when no browser
+  is on the PATH, so `--browser` is rarely needed. Edge works like Chrome.
+- **Lanes (firmware 1.3 with server 1.3): the stream spread over two TCP connections.** One connection carries at
+  most about 3 MB/s to the Tab5, because its 64 KB receive window is fixed; two carried 4.4 MB/s in tests (WiFi 6).
+  Each lane is drained into PSRAM by its own task, so the network stack's internal RAM isn't filled while frames
+  decode. Four minutes of detailed video: 2.83 MB/s instead of 2.50, quality 49 instead of 41 at the same 27 fps,
+  no stall over 250 ms, and the same internal-RAM margin as one connection (three lanes halved it for 3 % more).
+  If a "shown" is 150 ms overdue the server sends one more update, so a packet lost at the end of a lane's burst
+  is resent at once. `--lanes 1` keeps a single connection; older firmware and servers use one as before.
+- **Nudges (firmware):** with the stream on the lanes, a lost event from the Tab5 (a "shown" or a touch) waited for
+  lwIP's retransmission timer, over a second. While the page is busy the Tab5 now sends a tiny event after each
+  one, so a loss is resent at once.
+- **`wifiinfo` serial command:** shows whether the Tab5 uses WiFi 4 or WiFi 6. It does WiFi 6 only on a 2.4 GHz
+  network that offers it on 20 MHz channels; a router's "force WiFi 4" for IoT networks costs throughput.
+- **Statistics:** the serial `S` output includes lane and internal-memory figures.
+- **Fix (firmware): touches waited while updates kept coming.** The Tab5 handled every update already received
+  before reading the touch screen again, so with the link busy all the time (a video) a tap could reach the PC
+  seconds late. It now handles one update per pass of its main loop.
+- **Battery in the settings panel** (firmware): charge level, charging or not, voltage, current and a rough time
+  to full or time left, at the top right. The level comes from the resting voltage (the reading corrected for the
+  charge or load current), and a pack counts as present only after 8 s of steady readings, since the charger's
+  output swings between about 4 and 8 V with no pack fitted. The serial `S` statistics include the same line.
+
 ## 1.2.2 - 2026-10-15
 
 Server only; use it with firmware 1.2.0.

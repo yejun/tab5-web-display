@@ -29,10 +29,12 @@ Version 1.2.2 (firmware 1.2.0) · MIT licence
     a touch on screen in about 20–40 ms.
 - **Sound.** What the page plays comes out of the Tab5's speaker or headphone jack, about a tenth of a second
   behind the PC, the same as the picture. Needs a Linux PC with PulseAudio or PipeWire.
+- **Videos.** `--file clip.mp4` plays any video ffmpeg can decode, in a loop and with sound, at up to 30 fps.
+  Tap to pause, drag sideways to seek.
 - **Built-in apps that need no API keys:** a home launcher, a dashboard, a clock with calendar, sticky notes, a
   Chinese almanac (老黄历), and a touch demo with a motion test.
 - **Setup on the device.** A settings panel opens on first start to pick a WiFi network with an on-screen keyboard.
-  Later, swipe in from any screen edge to change WiFi, brightness or orientation.
+  Later, swipe in from any screen edge to change WiFi, brightness or orientation, or to check the battery.
 - **No firewall changes.** The Tab5 listens and the PC connects out to it.
 
 ## What you need
@@ -40,9 +42,11 @@ Version 1.2.2 (firmware 1.2.0) · MIT licence
 - **An M5Stack Tab5.**
 - **A PC on the same network** with Python 3.9 or newer. Tested on Linux; macOS and Windows should work but are
   untested.
-- **Chromium or Google Chrome.** If neither is installed, Playwright can download its own Chromium.
+- **Chromium, Google Chrome or Microsoft Edge.** The server finds them on the `PATH` or in their usual install
+  folders on Windows and macOS. If none is installed, Playwright can download its own Chromium.
 - **For sound:** Linux with PulseAudio or PipeWire, and its `pactl` and `parec` tools (packages `pulseaudio-utils`
   or `libpulse`). Without them everything else works, silently.
+- **For videos:** [ffmpeg](https://ffmpeg.org) (with `ffprobe`) on the PATH. Video sound needs no PulseAudio.
 - **To build the firmware:** [Arduino CLI](https://arduino.github.io/arduino-cli/).
 
 ## Quick start
@@ -101,6 +105,21 @@ python3 -m venv .venv
 | `server.py --app motion` | animation test with live frame rate |
 | `server.py --url https://example.com` | any web page |
 | `server.py --file my_page.html` | a local page, reloaded whenever it (or a file next to it) changes |
+| `server.py --file clip.mp4` | a video, in a loop, with sound (see below) |
+
+### Videos
+
+Any file ffmpeg can play as a video works: MP4, MKV, WebM, MOV, animated GIF, and so on. It is scaled to fit the
+screen and plays in a loop.
+
+- **Tap** to pause or resume.
+- **Drag sideways** to seek: across the whole screen is 2 minutes (or the whole video, if shorter). While the bar
+  shows, drag on the bar itself to put the position under your finger, or tap it to jump there. A seek stops at
+  the start and the end; letting go at the end plays the last moment, then the video starts over.
+- **The bar** at the bottom shows the time, the length and the file name. It stays while paused or seeking, and
+  fades out 3 seconds after a touch while playing.
+- **Picture quality** adapts to what WiFi carries: detailed footage plays at about 28 fps, simple footage at the
+  full 30. A paused picture sharpens to full quality.
 
 ### App settings
 
@@ -120,11 +139,12 @@ python3 -m venv .venv
 |---|---|
 | `--device IP` | Tab5 address (default: asked over USB) |
 | `--port PORT` | USB serial port (default: found automatically) |
-| `--browser PATH` | Chromium or Chrome executable (default: found on `PATH`) |
+| `--browser PATH` | Chromium, Chrome or Edge executable (default: found on the `PATH` or in the usual install folders) |
 | `--no-audio` | don't send the page's sound |
 | `--power-save auto\|off` | Tab5 WiFi power save. `auto` (default): off only while you touch, the page animates or sound plays. `off`: always off, for the quickest response but shorter battery life |
 | `--quality N` | JPEG quality once the page is still, default 95 (moving parts are sent rougher first) |
 | `--max-fps N` | cap on updates per second, default 60 |
+| `--lanes N` | TCP connections to spread the stream over (firmware 1.3 or later): `2` (default) or `1`, a single connection |
 | `--show` | also open a visible browser window |
 | `-v` | log every update |
 | `--version` | print the version |
@@ -148,6 +168,8 @@ by itself on first start, and whenever the saved network can't be joined.
   - The scan list is sorted strongest first, with "Other network ..." for hidden networks.
   - A network is saved only once it connects. If a new one fails, the Tab5 goes back to the previous network.
 - **Status:** the Tab5's address and the server command.
+- **Battery** (top right): charge level, whether it is charging, voltage and current, and a rough time to full
+  or time left.
 - **Display and sound:** brightness, volume, and flip 180°. All are remembered.
 
 **While the panel is open,** the PC connection pauses. After **Done**, the PC reconnects within 2 s and redraws the
@@ -198,6 +220,37 @@ PC: server/server.py                                    Tab5: firmware/web_displ
   little to hear) keeps it on target and follows the clock difference between PC and Tab5. The speaker is powered
   only while sound plays.
 
+**Videos:** two ffmpeg processes decode the picture (scaled and letterboxed to 1280×720, at most 30 fps) and the
+sound (48 kHz stereo). The server keeps the clock for pause, seek and loop, and hands each frame out when it is
+due: frames go through the same tile pipeline as a page's, and sound goes out as above, without PulseAudio. A
+video changes the whole screen every frame, so WiFi (about 2.5–3 MB/s) sets the pace. The quality of moving frames
+adapts to fit the measured link rate divided by the frame rate, between 35 and 85 (detailed footage measured
+141 KB per frame at quality 70 and 89 KB at 40, which still looks fine at the panel's 290 ppi). Sound is
+a few tens of milliseconds behind the picture at most.
+
+**Lanes (firmware 1.3):** one TCP connection to the Tab5 carries at most about 3 MB/s, because its 64 KB receive
+window is fixed in the precompiled network stack (Linux reported the connection held back by it half the time).
+So after the hello the stream moves to two connections, in 16 KB chunks dealt alternately; the Tab5 reassembles
+them in order. Measured on WiFi 6: one connection 3.1 MB/s, two 4.4, three 4.8, the radio's ceiling 5.0–5.3.
+- **Why two:** the router delivers each connection's 64 KB in bursts, into the network stack's buffers in internal
+  RAM, before anything can move it on. Over four minutes of video the lowest free internal RAM was 103 KB with one
+  connection, 100 KB with two and 33–56 KB with three, which carried only 3 % more than two.
+- **Each lane is drained by its own task** into a 1 MB buffer in PSRAM. Read in turn instead, every lane's window
+  filled while a frame decoded, in the network stack's buffers in internal RAM, which ran down to 140 bytes.
+  Drained at once, the low point stays near 100 KB, as with a single connection.
+- **Nudges.** With the stream on the lanes, the main connection only carries the Tab5's small events (touches,
+  "shown"), and a lost one waited for lwIP's retransmission timer, a second or more, stalling the stream several
+  times a minute. While updates or touches come and go, the Tab5 now follows each event with a tiny one within
+  20 ms, so a loss is noticed and resent at once.
+- **Fallback.** Older firmware, older servers, or a lane that can't be set up: one connection, as before. Any lane
+  that fails ends the session, and the server reconnects.
+- **Lost packets at the end of a burst.** With nothing after it, TCP would wait for its retransmission timer while
+  the Tab5 waits for that chunk. If a "shown" is 150 ms overdue, the server sends one more update, whose data
+  reveals the gap.
+- **What it brings:** four minutes of detailed video: 2.83 MB/s instead of 2.50, which the adaptive quality turns
+  into quality 49 instead of 41 at the same 27 fps, with no stall over 250 ms. More of the link's capacity is held
+  back by the two updates in flight: each round trip (send, decode, "shown") moves two.
+
 **Measured with `--app motion`:**
 
 | scene | changed area | Tab5 fps | data |
@@ -206,6 +259,8 @@ PC: server/server.py                                    Tab5: firmware/web_displ
 | follow finger, while dragging | <1% | ~55 | ~110 KB/s |
 | bouncing balls | 20–35% | 51–54 | ~1.2 MB/s |
 | full-screen animation | 75–90% | 28–34 | ~1.9 MB/s |
+| video, detailed (Big Buck Bunny 720p) | 100% | 26–29 (quality ~45) | ~2.7 MB/s |
+| video, simple | ~8% | 30 (quality 85) | ~100 KB/s |
 
 **Details worth knowing:**
 - **Colour range.** The P4's JPEG decoder expects "TV range" YCbCr (Y 16–235), but JPEG files use the full 0–255
@@ -234,7 +289,8 @@ USB serial at 115200 baud:
 | `rot` | flip the screen 180° |
 | `beep` | play a test tone and print the speaker's state |
 | `forget` | erase all saved settings and restart |
-| `S` | statistics since the last `S`, including sound |
+| `S` | statistics since the last `S`, including sound, battery, lanes and memory |
+| `wifiinfo` | the WiFi standard in use (WiFi 4 or 6), channel and signal |
 | `T <x> <y>`, `drag <x0> <y0> <x1> <y1> [ms]` | scripted touches, for testing without a finger |
 | `unconfigured` | behave like a first start until the next reboot |
 | `F` | dump the frame buffer; `tools/shot.py out.png` saves it as a PNG |
@@ -255,6 +311,10 @@ USB serial at 115200 baud:
   - `sound: off (needs PulseAudio or PipeWire ...)`: install `pactl` and `parec`. Sound works on Linux only.
   - Check the volume in the Tab5's settings.
   - Many sites start sound only after a tap.
+- **Video or large animations slower than expected:** run `wifiinfo` on the serial console. The Tab5 does WiFi 6
+  only on a 2.4 GHz network that offers it with 20 MHz channels. Router settings for IoT networks such as "force
+  WiFi 4" or 40 MHz channels make it fall back to WiFi 4, which carries noticeably less (measured: 4.1 against
+  4.8 MB/s over three connections in a test).
 - **Chromium not found:** run `.venv/bin/playwright install chromium`, or pass `--browser /path/to/chrome`.
 
 ## Licence

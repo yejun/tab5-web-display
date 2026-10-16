@@ -13,7 +13,8 @@
 //             5 = update shown (sent after each end marker, so the PC never has more than one update in flight),
 //             6 = hello, sent on connect: x.y.z = firmware version; flags: 1 = can play sound, 2 = takes strips,
 //             4 = screen flipped 180°. The PC sends "TCFG" and "TABS" only after a hello, so older firmware never
-//             sees them.
+//             sees them. 7 = lanes (offer and answer): the stream can continue over several connections, see lanes.h.
+//             8 = nudge: nothing, sent while the stream is on lanes so that a lost event is resent quickly.
 // Sound arrives separately as UDP, see audio.h.
 //
 // Each rectangle is decoded by the P4's hardware JPEG engine to RGB565 and rotated into the panel's portrait
@@ -22,7 +23,7 @@
 // Settings (WiFi, brightness, volume, flip): swipe in from any edge, or tap the screen while no page is shown. The panel
 // (settings_ui.h, LVGL) also opens by itself when no WiFi network is configured or the saved one can't be joined.
 //
-// Serial commands: ip | wifi <ssid> <password> | rot | S (stats) | F (dump the frame buffer, see tools/shot.py)
+// Serial commands: ip | wifi <ssid> <password> | wifiinfo | rot | S (stats) | F (dump the frame buffer, see tools/shot.py)
 //                  | T <x> <y> (scripted tap) | drag <x0> <y0> <x1> <y1> [ms] | panel (open the settings)
 //                  | beep (speaker check) | forget (erase saved settings and restart)
 #include <M5Unified.h>
@@ -35,8 +36,9 @@
 #include <esp_cache.h>
 #include <esp_heap_caps.h>
 #include <esp_timer.h>
+#include <esp_wifi.h>
 
-static constexpr const char* FIRMWARE_VERSION = "1.2.0";
+static constexpr const char* FIRMWARE_VERSION = "1.3.0";
 static constexpr int SCR_W = 1280, SCR_H = 720;   // landscape, as the page is rendered
 static constexpr int FB_W = 720, FB_H = 1280;     // the panel's native portrait frame buffer
 static constexpr uint16_t PORT = 8765;
@@ -48,7 +50,7 @@ static constexpr int64_t CONNECT_TIMEOUT_MS = 20000, RETRY_MS = 30000;
 static constexpr int EDGE = 40, SWIPE_IN = 120;           // edge swipe: start within EDGE px, move SWIPE_IN px inwards
 static constexpr int64_t SWIPE_MS = 700;
 
-enum : uint8_t { EV_DOWN = 1, EV_MOVE = 2, EV_UP = 3, EV_SHOWN = 5, EV_HELLO = 6 };
+enum : uint8_t { EV_DOWN = 1, EV_MOVE = 2, EV_UP = 3, EV_SHOWN = 5, EV_HELLO = 6, EV_LANES = 7, EV_NUDGE = 8 };
 enum : uint8_t { HELLO_SOUND = 1, HELLO_STRIPS = 2, HELLO_FLIPPED = 4 };   // hello flags
 
 #pragma pack(push, 1)
@@ -185,13 +187,19 @@ static bool ppa_blit(const void* src, int x, int y, int w, int h) {
 
 // ---- PC connection ------------------------------------------------------------------------------------------
 
+static int64_t g_event_sent = 0;   // when the last event went to the PC
+
 static void send_event(uint8_t type, int x, int y, uint8_t flags = 0, uint16_t z = 0) {
   if (!g_have_client || !g_client.connected()) return;
   const Event e = {type, flags, (uint16_t)x, (uint16_t)y, z};
   g_client.write((const uint8_t*)&e, sizeof(e));
+  g_event_sent = esp_timer_get_time() / 1000;
 }
 
+#include "lanes.h"
+
 static void drop_client() {
+  lanes_close();
   if (g_have_client) g_client.stop();
   g_have_client = g_shown_any = false;
   g_pc_ip = 0;
@@ -199,6 +207,7 @@ static void drop_client() {
 }
 
 static bool read_exact(uint8_t* p, size_t n) {
+  if (g_lanes_on) return lanes_read(p, n);
   size_t got = 0;
   const int64_t deadline = now_ms() + 3000;
   while (got < n && g_client.connected() && now_ms() < deadline) {
@@ -236,6 +245,8 @@ static bool handle_strip(const RectHeader& h) {
   return true;
 }
 
+static bool g_update_done = false;   // handle_rect() just finished an update
+
 // Receive and draw one rectangle (or the end marker). Returns false if the connection must be dropped.
 static bool handle_rect() {
   RectHeader h;
@@ -247,6 +258,7 @@ static bool handle_rect() {
     return true;
   }
   if (memcmp(h.magic, "TABS", 4) == 0) return handle_strip(h);
+  if (memcmp(h.magic, "TSTR", 4) == 0) { lanes_start(h); return true; }
   if (memcmp(h.magic, "TAB5", 4) != 0) { Serial.println("ERR bad header"); return false; }
   if (h.w == 0 && h.h == 0) {   // end of update
     // continuous changes (an animation) arrive much faster under modem sleep's ~100 ms wake-ups if the radio stays on;
@@ -257,6 +269,7 @@ static bool handle_rect() {
     g_stats.updates++;
     g_shown_any = true;
     send_event(EV_SHOWN, 0, 0);
+    g_update_done = true;
     return true;
   }
   if (h.len == 0 || h.len > g_in_cap || h.x % 16 || h.y % 16 || h.w % 16 || h.h % 16 || h.w == 0 || h.h == 0 ||
@@ -297,7 +310,8 @@ static void pc_poll() {
     g_have_client = true;
     g_pc_ip = (uint32_t)g_client.remoteIP();
     Serial.printf("PC connected from %s\n", g_client.remoteIP().toString().c_str());
-    send_event(EV_HELLO, 1, 2, HELLO_SOUND | HELLO_STRIPS | (g_rot == 3 ? HELLO_FLIPPED : 0), 0);   // version 1.2.0
+    send_event(EV_HELLO, 1, 3, HELLO_SOUND | HELLO_STRIPS | (g_rot == 3 ? HELLO_FLIPPED : 0), 0);   // version 1.3.0
+    lanes_offer();
   }
   if (!g_have_client) return;
   if (!g_client.connected()) {
@@ -315,11 +329,39 @@ static void pc_poll() {
     }
     return;
   }
-  while (g_client.available() >= (int)sizeof(RectHeader))
+  // one update at a time: while the PC keeps the link busy (a video), the next one is always waiting, and touches
+  // and sound must still get their turn in between
+  lanes_accept();
+  if (lanes_failed()) { Serial.println("ERR lane closed"); g_client.stop(); return; }
+  // With the stream on the lanes, the main connection only carries our events. When one is lost, nothing follows it,
+  // and lwIP resends only on its retransmission timer, which is at least a second (its 500 ms ticks): measured, the
+  // PC waited 1.1-1.4 s for an update's "shown" several times a minute. So while updates or touches come and go,
+  // a nudge follows every event within 20 ms: a lost one is then followed by others, the PC answers with
+  // duplicate acks, and lwIP resends it at once.
+  const int64_t now = now_ms();
+  if (g_lanes_on && now - g_event_sent >= 20 && (now - g_last_update < 500 || now - g_last_touch < 500))
+    send_event(EV_NUDGE, 0, 0);
+  g_update_done = false;
+  while (!g_update_done && (g_lanes_on ? lanes_ready() : g_client.available() >= (int)sizeof(RectHeader)))
     if (!handle_rect()) { g_client.stop(); break; }
 }
 
 // ---- WiFi ---------------------------------------------------------------------------------------------------
+
+// Serial "wifiinfo": the WiFi standard in use. The Tab5 does WiFi 6 only if the router offers it on that network,
+// on a 20 MHz channel; otherwise WiFi 4, which carries noticeably less.
+static void wifi_info() {
+  wifi_phy_mode_t phy;
+  wifi_ap_record_t ap;
+  if (esp_wifi_sta_get_negotiated_phymode(&phy) != ESP_OK || esp_wifi_sta_get_ap_info(&ap) != ESP_OK) {
+    Serial.println("wifi: not connected");
+    return;
+  }
+  const char* name = phy == WIFI_PHY_MODE_HE20 ? "WiFi 6 (802.11ax, 20 MHz)" : phy == WIFI_PHY_MODE_HT40 ? "WiFi 4 (802.11n, 40 MHz)"
+                   : phy == WIFI_PHY_MODE_HT20 ? "WiFi 4 (802.11n, 20 MHz)" : phy == WIFI_PHY_MODE_11G ? "802.11g" : "802.11b";
+  Serial.printf("wifi: %s on channel %d, %d dBm; the network %s WiFi 6\n", name, ap.primary, ap.rssi,
+                ap.phy_11ax ? "offers" : "does not offer");
+}
 
 static void set_wifi_sleep(bool on) {
   if (on == g_wifi_sleep) return;
@@ -408,6 +450,7 @@ static TouchPoint read_touch() {
 
 static void script_touch(int x0, int y0, int x1, int y1, int ms) { g_script = {now_ms(), ms, x0, y0, x1, y1}; }
 
+#include "battery.h"
 #include "settings_ui.h"
 
 // ---- touch on the mirrored page -------------------------------------------------------------------------------
@@ -487,6 +530,18 @@ static void print_stats() {
                 (unsigned)a.packets, (unsigned)a.late, (unsigned)a.lost_frames, (unsigned)a.holdups, (unsigned)a.dropped,
                 (unsigned)a.repeated, (int)(g_level * 1000 / AUDIO_RATE), g_target * 1000 / AUDIO_RATE,
                 g_spk_ready ? "on" : "off", g_vol);
+  char batt[128];
+  battery_text(batt, sizeof(batt));
+  Serial.printf("battery | %s\n", batt);
+  const LaneStats ls = g_lstats;
+  g_lstats = {};
+  Serial.printf("lanes | %d in use | chunks %u | waited for data %u times, %u ms (lanes %u/%u), longest %u ms | longest idle %u ms on lane %u, others holding %u bytes\n", g_lanes_on,
+                (unsigned)ls.chunks, (unsigned)ls.waits, (unsigned)ls.wait_ms, (unsigned)ls.lane_wait_ms[0],
+                (unsigned)ls.lane_wait_ms[1], (unsigned)ls.max_wait_ms, (unsigned)ls.idle_max_ms,
+                (unsigned)ls.idle_lane, (unsigned)ls.idle_others);
+  Serial.printf("memory | internal free %u (lowest %u, largest block %u) | psram free %u\n",
+                (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL), (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL), (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
   g_stats = {};
   g_astats = {};
 }
@@ -504,6 +559,8 @@ static void handle_serial() {
       print_stats();
     } else if (line == "F") {
       dump_framebuffer();
+    } else if (line == "wifiinfo") {
+      wifi_info();
     } else if (line == "panel") {
       panel_open();
     } else if (line == "forget") {         // erase all saved settings (WiFi, brightness, flip) and restart
@@ -544,7 +601,7 @@ static void handle_serial() {
       const int sp = line.indexOf(' ', 5);
       wifi_start(sp > 0 ? line.substring(5, sp) : line.substring(5), sp > 0 ? line.substring(sp + 1) : "");
     } else if (line.length()) {
-      Serial.println("commands: ip | wifi <ssid> <password> | rot | S | F | T <x> <y> | drag x0 y0 x1 y1 [ms] | panel | beep | forget");
+      Serial.println("commands: ip | wifi <ssid> <password> | wifiinfo | rot | S | F | T <x> <y> | drag x0 y0 x1 y1 [ms] | panel | beep | forget");
     }
     line = "";
   }
@@ -575,6 +632,7 @@ void setup() {
   ui_setup();
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
+  lanes_begin();
   g_ssid = prefs.getString("ssid", "");
   g_pass = prefs.getString("pass", "");
   if (g_ssid.isEmpty()) panel_open();   // first start: straight to the WiFi setup
@@ -593,6 +651,7 @@ void loop() {
     handle_touch();
   }
   speaker_poll();
+  battery_poll();
   set_wifi_sleep(g_power_mode == 0 && !g_panel_open && now_ms() - g_last_touch > AWAKE_AFTER_TOUCH_MS &&
                  now_ms() - g_last_stream > AWAKE_AFTER_STREAM_MS && !audio_recent(AWAKE_AFTER_SOUND_MS));
   // while updates stream in, come back quickly for the next one; otherwise save power

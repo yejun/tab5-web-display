@@ -14,6 +14,7 @@ the Tab5 as UDP (see firmware/web_display/audio.h). Nothing is sent while the pa
     server.py --app dashboard          # a built-in app: home, dashboard, clock, notes, almanac, demo, motion
     server.py --url https://example.com
     server.py --file my_page.html      # a local page, reloaded whenever it changes
+    server.py --file clip.mp4          # a video, in a loop (with ffmpeg): tap to pause, drag sideways to seek
     server.py --app dashboard --city Berlin --units metric
     server.py --url https://example.com --power-save off   # quickest response, shortest battery life
 
@@ -25,6 +26,7 @@ import asyncio
 import base64
 import collections
 import io
+import itertools
 import json
 import os
 import pathlib
@@ -34,13 +36,14 @@ import socket
 import struct
 import subprocess
 import sys
+import threading
 import time
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 from playwright.async_api import async_playwright
 
-__version__ = "1.2.2"
+__version__ = "1.3.0"
 
 W, H, TILE, PORT = 1280, 720, 16, 8765
 # Chromium's rasterisation jitters a few pixels by a few levels between frames. A tile counts as changed if some
@@ -69,7 +72,14 @@ SOFT_MIN = 48         # 4:2:0 only for pieces this big both ways: the Tab5's dec
 TOUCH_QUIET_S = 0.5   # ... but only one in flight this soon after a touch, where delay matters more than frame rate
 RECT = struct.Struct("<4sHHHHI")   # "TAB5" (or "TABS", a strip), x, y, w, h, jpeg length
 EVENT = struct.Struct("<BBHHH")    # type, flags, x, y, z
-EV_DOWN, EV_MOVE, EV_UP, EV_SHOWN, EV_HELLO = 1, 2, 3, 5, 6
+EV_DOWN, EV_MOVE, EV_UP, EV_SHOWN, EV_HELLO, EV_LANES = 1, 2, 3, 5, 6, 7
+# Lanes (firmware 1.3): one TCP connection carries at most ~3 MB/s to the Tab5, because its 64 KB receive window is
+# fixed; spread over two connections in chunks, ~4.4 MB/s on WiFi 6. See firmware/web_display/lanes.h (also for why
+# not more than two).
+LANE_HDR = struct.Struct("<II")    # chunk sequence number, length
+LANE_CHUNK = 16384
+LANE_OVERDUE_S = 0.15
+LANE_OFFER, LANE_ACCEPTED, LANE_REFUSED = 0, 1, 2
 HELLO_SOUND, HELLO_STRIPS, HELLO_FLIPPED = 1, 2, 4
 AUDIO = struct.Struct("<4sIHH")    # "TAUD", stream position of the first frame, frames, 0
 AUDIO_RATE, AUDIO_FRAMES = 48000, 360   # 7.5 ms of 16-bit stereo per datagram: 1440 bytes, one WiFi frame
@@ -211,14 +221,39 @@ def check_firmware(firmware):
               "features; update the server from https://github.com/yejun/tab5-web-display")
 
 
-class SystemAudio:
+class AudioOut:
+    """Sends 48 kHz stereo 16-bit PCM to the Tab5 as UDP datagrams of AUDIO_FRAMES frames each."""
+
+    def __init__(self):
+        self.target = None   # (ip, port) of a Tab5 that can play sound, or None
+        self.pos = 0         # stream position of the next datagram
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.setblocking(False)
+
+    def send(self, pcm):
+        if self.target:
+            try:
+                self.sock.sendto(AUDIO.pack(b"TAUD", self.pos, AUDIO_FRAMES, 0) + pcm, self.target)
+            except OSError:
+                pass   # a lost datagram is a 7.5 ms gap; the next one goes out regardless
+        self.skip(AUDIO_FRAMES)
+
+    def skip(self, frames):
+        self.pos = (self.pos + frames) & 0xFFFFFFFF
+
+    def restart(self):
+        """Jump far enough that the Tab5 starts a new stream, dropping what it still has buffered (after a seek)."""
+        self.skip(1 << 16)
+
+
+class SystemAudio(AudioOut):
     """Chromium plays into a private PulseAudio/PipeWire sink (it honours PULSE_SINK); the sink's monitor is
     recorded with parec and sent to the Tab5 as UDP datagrams while there is sound."""
 
     def __init__(self):
+        super().__init__()
         self.sink = f"{SINK_PREFIX}{os.getpid()}"
         self.module = None
-        self.target = None   # (ip, port) of a Tab5 that can play sound, or None
 
     @staticmethod
     def pactl(*args):
@@ -257,30 +292,25 @@ class SystemAudio:
 
     async def run(self):
         silence = bytes(AUDIO_FRAMES * 4)
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setblocking(False)
         proc = await asyncio.create_subprocess_exec(
             "parec", "-d", f"{self.sink}.monitor", "--raw", "--format=s16le", f"--rate={AUDIO_RATE}", "--channels=2",
             "--latency-msec=10", stdout=asyncio.subprocess.PIPE)
-        pos, loud_until = 0, 0.0
+        loud_until = 0.0
         try:
             while True:
                 pcm = await proc.stdout.readexactly(len(silence))
                 now = time.monotonic()
                 if pcm != silence:
                     loud_until = now + AUDIO_TAIL_S
-                if self.target and now < loud_until:
-                    try:
-                        sock.sendto(AUDIO.pack(b"TAUD", pos, AUDIO_FRAMES, 0) + pcm, self.target)
-                    except OSError:
-                        pass   # a lost datagram is a 7.5 ms gap; the next one goes out regardless
-                pos = (pos + AUDIO_FRAMES) & 0xFFFFFFFF
+                if now < loud_until:
+                    self.send(pcm)
+                else:
+                    self.skip(AUDIO_FRAMES)
         except asyncio.IncompleteReadError:
             print("sound: the recorder stopped")
         finally:
             if proc.returncode is None:
                 proc.kill()
-            sock.close()
 
 
 class Mirror:
@@ -301,6 +331,9 @@ class Mirror:
         self.stats_task = None
         self.live, self.host = False, None   # live: the Tab5 is showing our updates
         self.touches, self.touch_wake = collections.deque(), asyncio.Event()   # touches waiting for the page
+        self.lane_offer, self.lane_answer, self.lane_answered = None, None, asyncio.Event()
+        self.lanes, self.lane_readers, self.seq = [], [], 0   # lane writers, and the next chunk's number
+        self.lanes_broken = False      # a lane setup failed: don't try again in this run
 
     @staticmethod
     def decode_png(data):
@@ -371,6 +404,12 @@ class Mirror:
                 self.acked.set()
             elif kind in (EV_DOWN, EV_MOVE, EV_UP):
                 self.queue_touch(kind, x, y)
+            elif kind == EV_LANES:
+                if flags == LANE_OFFER:
+                    self.lane_offer = (x, y, _z)   # port, token, most lanes
+                else:
+                    self.lane_answer = flags
+                    self.lane_answered.set()
             elif kind == EV_HELLO:   # firmware 1.1 or later: it takes settings and can play sound
                 self.writer.write(RECT.pack(b"TCFG", POWER_SAVE[self.args.power_save], 0, 0, 0, 0))
                 if self.audio and flags & HELLO_SOUND:
@@ -382,10 +421,12 @@ class Mirror:
         self.host = host
         reader, writer = await asyncio.open_connection(host, PORT)
         self.writer = writer
+        self.connected(True)
         self.in_flight.clear()
         self.touches.clear()
         self.strips = self.flipped = False
         self.firmware = None
+        self.lane_offer, self.lanes, self.seq = None, [], 0
         events = asyncio.create_task(self.read_events(reader))
         toucher = asyncio.create_task(self.dispatch_touches())
         prev, last_start, last_sent, needs_settle = None, 0.0, 0.0, False
@@ -395,6 +436,8 @@ class Mirror:
         stats, stats_t = [], time.monotonic()
         try:
             while not events.done():
+                if self.lane_offer and not self.lanes and self.args.lanes > 1 and not self.lanes_broken:
+                    await self.open_lanes(host)
                 settle = False
                 try:   # repaints wake us; the timeouts are the cleanup pass and a safety net
                     await asyncio.wait_for(self.dirty.wait(), SETTLE_S if needs_settle else 1.0)
@@ -414,7 +457,7 @@ class Mirror:
                 def diff_and_encode():   # in a worker thread, so touches, acks and sound keep flowing meanwhile
                     tiles = changed_tiles(prev, cur, exact=settle)
                     changed_at[tiles] = t0
-                    motion_q = min(top, MOTION_Q_BIG if tiles.mean() >= BIG_MOTION else MOTION_Q_SMALL)
+                    motion_q = self.motion_quality(tiles.mean())
                     pieces = []   # (piece, quality, subsampling)
                     for piece in plan(tiles | rough if settle else tiles, self.strips):
                         _, x, y, w, h = piece
@@ -440,19 +483,33 @@ class Mirror:
                     return pieces, out
                 pieces, out = await asyncio.to_thread(diff_and_encode)
                 t2 = time.monotonic()
+                if moving and pieces:
+                    self.encoded(len(out))
                 if pieces:
                     out += RECT.pack(b"TAB5", 0, 0, 0, 0, 0)
                     # at most one update in flight, or two during an animation (not right after a touch)
                     quiet = self.touch_at is None or t0 - self.touch_at > TOUCH_QUIET_S
                     limit = 2 if moving and quiet else 1
+                    t_wait = time.monotonic()
                     while len(self.in_flight) >= limit:
                         self.acked.clear()
-                        await asyncio.wait_for(self.acked.wait(), 5.0)
+                        if not self.lanes or len(self.in_flight) > limit:
+                            await asyncio.wait_for(self.acked.wait(), 5.0)
+                            continue
+                        # On lanes, a packet lost at the end of a lane's burst has nothing after it to show the gap,
+                        # and TCP waits for its retransmission timer while the Tab5 waits for the chunk (measured:
+                        # stalls of over a second a few times in four minutes). If "shown" is overdue, one more
+                        # update goes out: its data reveals the gap, and the lost packet is resent at once.
+                        try:
+                            await asyncio.wait_for(self.acked.wait(), LANE_OVERDUE_S)
+                        except TIMEOUTS:
+                            break
                     if touch_t is not None:
                         self.touch_at = None
                     self.in_flight.append((time.monotonic(), touch_t))
-                    writer.write(out)
-                    await asyncio.wait_for(writer.drain(), 5.0)
+                    t_send = time.monotonic()
+                    await self.send(out)
+                    t_sent = time.monotonic()
                     last_sent = t0
                     # remember only what the Tab5 now shows, so sub-threshold drift still adds up and gets sent
                     if prev is None:
@@ -471,7 +528,8 @@ class Mirror:
                         print(f"{len(pieces) - n_strips} rect(s) {n_strips} strip(s), {n_rough} rough, "
                               f"{rough.sum()} rough tiles left "
                               f"{len(out) / 1024:6.1f} KB | decode {1000 * (t1 - t0):3.0f} ms "
-                              f"diff+encode {1000 * (t2 - t1):3.0f} ms in flight {len(self.in_flight)}")
+                              f"diff+encode {1000 * (t2 - t1):3.0f} ms in flight {len(self.in_flight)} | ack wait "
+                              f"{1000 * (t_send - t_wait):4.0f} ms send {1000 * (t_sent - t_send):4.0f} ms")
                 elif touch_t is not None and t0 - touch_t > 1.0:
                     self.touch_at = None   # the touch changed nothing visible
                 if (now := time.monotonic()) - stats_t >= 1.0:
@@ -481,8 +539,69 @@ class Mirror:
             events.cancel()
             toucher.cancel()
             writer.close()
+            for w in self.lanes:
+                w.close()
+            self.lanes = []
+            self.connected(False)
             if self.audio:
                 self.audio.target = None
+
+    async def open_lanes(self, host):
+        """Spread the stream over several connections, if the Tab5 offered it (firmware 1.3). If it refuses, the
+        stream stays on the main connection; if it doesn't answer, the session restarts without lanes."""
+        port, token, most = self.lane_offer
+        n = min(self.args.lanes, most)
+        self.lane_offer = None
+        if n < 2:
+            return
+        conns = []
+        try:
+            for i in range(n):
+                r, w = await asyncio.wait_for(asyncio.open_connection(host, port), 3)
+                w.get_extra_info("socket").setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                w.write(RECT.pack(b"TLAN", i, token, n, 0, 0))
+                conns.append((r, w))
+            self.lane_answered.clear()
+            self.writer.write(RECT.pack(b"TSTR", n, token, 0, 0, 0))
+            await asyncio.wait_for(self.lane_answered.wait(), 5)
+        except (OSError, *TIMEOUTS) as e:
+            for _, w in conns:
+                w.close()
+            self.lanes_broken = True
+            raise ConnectionError(f"lane setup failed ({e or type(e).__name__}); continuing with one connection") from None
+        if self.lane_answer != LANE_ACCEPTED:
+            for _, w in conns:
+                w.close()
+            print("the Tab5 refused lanes; continuing with one connection")
+            return
+        self.lanes, self.lane_readers, self.seq = [w for _, w in conns], [r for r, _ in conns], 0
+        if self.args.verbose:
+            print(f"stream on {n} lanes")
+
+    async def send(self, data):
+        """An update to the Tab5: on the main connection, or cut into chunks dealt round the lanes."""
+        if not self.lanes:
+            self.writer.write(data)
+            await asyncio.wait_for(self.writer.drain(), 5.0)
+            return
+        view = memoryview(data)
+        for i in range(0, len(data), LANE_CHUNK):
+            part = view[i:i + LANE_CHUNK]
+            lane = self.lanes[self.seq % len(self.lanes)]
+            lane.write(LANE_HDR.pack(self.seq & 0xFFFFFFFF, len(part)))
+            lane.write(part)
+            self.seq += 1
+        await asyncio.wait_for(asyncio.gather(*(w.drain() for w in self.lanes)), 5.0)
+
+    def connected(self, up):
+        """Called when a session with the Tab5 starts and ends."""
+
+    def motion_quality(self, changed):
+        """JPEG quality for the moving parts of an update in which this share of the screen changed."""
+        return min(self.args.quality, MOTION_Q_BIG if changed >= BIG_MOTION else MOTION_Q_SMALL)
+
+    def encoded(self, size):
+        """Called with the size of each update sent during motion."""
 
     async def report(self, stats, secs):
         """Once a second: print a summary of continuous activity and hand it to the page (window.tab5Stats)."""
@@ -506,6 +625,377 @@ class Mirror:
             pass   # page busy or navigating
 
 
+# ---- local video files ----------------------------------------------------------------------------------------
+# ffmpeg decodes the picture and the sound in two processes; the server keeps the clock (pause, seek, loop) and
+# hands each frame to the same pipeline as a page's, so only what changed is sent and the paused picture is
+# refined to the top quality. Sound goes to the Tab5 as from a page, without PulseAudio.
+VIDEO_FPS = 30          # at most this many frames per second: the Tab5 draws full-screen changes at about 30 fps
+BAR_H = 120             # the position bar draws into this much of the bottom of the screen (with its shade)
+BAR_X0, BAR_X1 = 32, W - 32
+BAR_SHOW_S, BAR_FADE_S = 3.0, 0.4   # shown this long after a touch while playing (always while paused or seeking)
+DRAG_PX = 24            # a touch that moves this far sideways seeks, otherwise it is a tap (pause / resume)
+SEEK_SPAN_S = 120       # dragging across the whole screen seeks this far (through the whole video if shorter);
+                        # dragging on the bar itself puts the position under the finger
+PREVIEW_S = 0.15        # while seeking, the frame at the drag position is shown at most this often
+ACCENT = (90, 226, 199)  # as in the Tab5's settings
+# Video frames change all over, so WiFi (about 2.5-3 MB/s) sets the frame rate. The quality of moving frames adapts
+# to fit each frame into the measured link rate / frame rate: detailed footage measured 141 KB per frame at q70 and
+# still 89 KB at q40 (which looks fine on the Tab5's 290 ppi panel), simple footage 43 KB at q70.
+VIDEO_Q_MIN, VIDEO_Q_MAX = 35, 85
+VIDEO_RATE0 = 2.5e6     # bytes/s assumed at the start
+PAGE_SUFFIXES = {".html", ".htm", ".xhtml", ".svg"}
+
+
+def probe_video(path):
+    """(duration in seconds or None, frame rate, has sound) if ffmpeg can play the file as a video, else None."""
+    try:
+        out = subprocess.run(["ffprobe", "-v", "error", "-of", "json", "-show_entries",
+                              "format=duration,format_name:stream=codec_type,avg_frame_rate,r_frame_rate:"
+                              "stream_disposition=attached_pic", str(path)],
+                             capture_output=True, text=True, timeout=15)
+        info = json.loads(out.stdout or "{}")
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    fmt, streams = info.get("format", {}), info.get("streams", [])
+    if "image2" in fmt.get("format_name", "") or fmt.get("format_name", "").endswith("_pipe"):
+        return None   # a still image
+    video = [s for s in streams if s.get("codec_type") == "video" and not s.get("disposition", {}).get("attached_pic")]
+    if not video:
+        return None
+    rate = VIDEO_FPS
+    for key in ("avg_frame_rate", "r_frame_rate"):
+        num, _, den = video[0].get(key, "0/0").partition("/")
+        try:
+            if float(den or 1) > 0 and float(num) / float(den or 1) > 0:
+                rate = float(num) / float(den or 1)
+                break
+        except ValueError:
+            pass
+    try:
+        duration = float(fmt["duration"])
+    except (KeyError, ValueError):
+        duration = None
+    return duration, rate, any(s.get("codec_type") == "audio" for s in streams)
+
+
+def read_full(f, n):
+    """n bytes from a pipe, or None at its end."""
+    buf = bytearray(n)
+    view, got = memoryview(buf), 0
+    while got < n:
+        r = f.readinto(view[got:])
+        if not r:
+            return None
+        got += r
+    return buf
+
+
+def clock_text(s, hours=False):
+    s = int(s)
+    return f"{s // 3600}:{s // 60 % 60:02}:{s % 60:02}" if hours or s >= 3600 else f"{s // 60}:{s % 60:02}"
+
+
+class Video:
+    """A video file played by ffmpeg: a clock that pauses, seeks and loops, and decoder threads that hand out each
+    frame and sound datagram when the clock reaches it. Frames are scaled to fit the screen, letterboxed."""
+
+    def __init__(self, path, duration, fps, has_sound, audio, on_frame):
+        self.path, self.duration, self.audio, self.on_frame = path, duration, audio if has_sound else None, on_frame
+        self.fps = min(fps, VIDEO_FPS)
+        self.loop = asyncio.get_running_loop()
+        self.gen = 0                  # bumped by every (re)start; older decoder threads then quit
+        self.procs = []
+        self.halts = {"offline"}      # the clock stands still while any: "pause", "seek", "offline" (no Tab5)
+        self.clock = (0.0, time.monotonic(), False)   # (position, at monotonic time, running): one atomic value
+        self.skipped = 0              # frames dropped because decoding fell behind
+
+    @property
+    def paused(self):
+        return "pause" in self.halts
+
+    def position(self):
+        pos, t, running = self.clock
+        return pos + (time.monotonic() - t if running else 0.0)
+
+    def halt(self, why, on):
+        pos = self.position()
+        (self.halts.add if on else self.halts.discard)(why)
+        self.clock = (pos, time.monotonic(), not self.halts)
+
+    def filters(self):
+        return (f"fps={self.fps:.3f},scale={W}:{H}:force_original_aspect_ratio=decrease,"
+                f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2")
+
+    def start(self, pos):
+        """(Re)start decoding at pos seconds; the clock keeps running or standing still as before."""
+        self.stop()
+        self.gen += 1
+        self.clock = (pos, time.monotonic(), not self.halts)
+        cmd = ["ffmpeg", "-v", "error", "-nostdin", "-ss", f"{pos:.3f}", "-i", str(self.path), "-sn"]
+        v = subprocess.Popen(cmd + ["-an", "-vf", self.filters(), "-pix_fmt", "rgb24", "-f", "rawvideo", "-"],
+                             stdout=subprocess.PIPE)
+        self.procs = [v]
+        threading.Thread(target=self.play_video, args=(self.gen, v, pos), daemon=True).start()
+        if self.audio:
+            a = subprocess.Popen(cmd + ["-vn", "-f", "s16le", "-ar", str(AUDIO_RATE), "-ac", "2", "-"],
+                                 stdout=subprocess.PIPE)
+            self.procs.append(a)
+            threading.Thread(target=self.play_sound, args=(self.gen, a, pos), daemon=True).start()
+
+    def stop(self):
+        for p in self.procs:
+            p.kill()
+        self.procs = []
+
+    def wait_for(self, gen, pts):
+        """Sleep until the clock reaches pts; False if this decoder was replaced meanwhile."""
+        while gen == self.gen:
+            ahead = pts - self.position()
+            if ahead <= 0:
+                return True
+            time.sleep(min(ahead, 0.02))   # while the clock stands still this just keeps checking
+        return False
+
+    def play_video(self, gen, proc, start):
+        try:
+            for i in itertools.count():
+                frame = read_full(proc.stdout, W * H * 3)
+                if gen != self.gen:
+                    return
+                if frame is None:   # the end: play it again from the start
+                    self.loop.call_soon_threadsafe(self.ended, gen, start, i == 0)
+                    return
+                pts = start + i / self.fps
+                # the first frame shows at once, so a seek while paused shows where it landed
+                if i and not self.wait_for(gen, pts):
+                    return
+                if i and self.position() - pts > 1 / self.fps:
+                    self.skipped += 1
+                    continue
+                self.loop.call_soon_threadsafe(self.on_frame, gen, np.frombuffer(frame, np.uint8).reshape(H, W, 3))
+        finally:
+            proc.stdout.close()
+            proc.wait()
+
+    def play_sound(self, gen, proc, start):
+        n, last_sent = AUDIO_FRAMES * 4, 0.0
+        self.audio.restart()
+        try:
+            for k in itertools.count():
+                pcm = read_full(proc.stdout, n)
+                pts = start + k * AUDIO_FRAMES / AUDIO_RATE
+                if pcm is None or not self.wait_for(gen, pts):
+                    return
+                now = time.monotonic()
+                if self.position() - pts > 0.1:   # late, after the clock jumped: leave a gap
+                    self.audio.skip(AUDIO_FRAMES)
+                    continue
+                if now - last_sent > 0.2:   # resumed after a pause: a new stream, not a hold-up to buffer more for
+                    self.audio.restart()
+                self.audio.send(bytes(pcm))
+                last_sent = now
+        finally:
+            proc.stdout.close()
+            proc.wait()
+
+    def ended(self, gen, start, empty):
+        if gen != self.gen:
+            return
+        if empty and start == 0:
+            print(f"ffmpeg could not decode {self.path.name}")
+            self.gen += 1   # and stay on the last picture
+            return
+        self.start(0.0)
+
+    def grab(self, pos):
+        """The single frame at pos (for the preview while seeking), or None."""
+        try:
+            out = subprocess.run(["ffmpeg", "-v", "error", "-nostdin", "-ss", f"{pos:.3f}", "-i", str(self.path),
+                                  "-an", "-sn", "-frames:v", "1", "-vf", self.filters(), "-pix_fmt", "rgb24",
+                                  "-f", "rawvideo", "-"], capture_output=True, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if len(out.stdout) != W * H * 3:
+            return None
+        return np.frombuffer(out.stdout, np.uint8).reshape(H, W, 3)
+
+
+class VideoMirror(Mirror):
+    """A video file mirrored to the Tab5: tap to pause and resume, drag sideways to seek. A bar at the bottom shows
+    the position while paused or seeking and for a few seconds after a touch."""
+
+    def __init__(self, args, audio, path, info):
+        super().__init__(None, None, args, audio)
+        self.name = path.name
+        self.video = Video(path, *info, audio, self.new_frame)
+        self.still = None            # the preview frame while seeking
+        self.down = None             # (x, y, time, position) where the current touch started
+        self.seeking, self.on_bar, self.target = False, False, 0.0
+        self.bar_until = time.monotonic() + BAR_SHOW_S
+        self.previewer = None
+        self.vq = 70.0               # quality of moving frames, adapted to fit the link
+        self.rate = VIDEO_RATE0      # estimated link rate, bytes/s
+        self.font = ImageFont.load_default(size=26)
+        self.small = ImageFont.load_default(size=21)
+
+    def new_frame(self, gen, frame):
+        if gen == self.video.gen:
+            self.frame, self.still = frame, None
+            self.dirty.set()
+
+    def connected(self, up):
+        self.video.halt("offline", not up)
+
+    async def push_stats(self, s):
+        pass   # no page to show them
+
+    def motion_quality(self, changed):
+        return round(self.vq) if changed >= BIG_MOTION else super().motion_quality(changed)
+
+    def encoded(self, size):
+        # JPEG size roughly doubles from q40 to q80: step towards the quality whose frames fit the budget
+        budget = self.rate / self.video.fps
+        self.vq = min(VIDEO_Q_MAX, max(VIDEO_Q_MIN, self.vq + 10 * np.log2(budget / size)))
+
+    async def report(self, stats, secs):
+        # the link rate: what got through while frames were missed; otherwise there may be more, so probe upwards
+        if stats and not self.video.halts:
+            fps, rate = len(stats) / secs, sum(b for b, *_ in stats) / secs
+            if fps < 0.9 * self.video.fps:
+                self.rate = 0.6 * self.rate + 0.4 * rate
+            else:
+                self.rate = min(self.rate * 1.05, 4e6)
+        if self.args.verbose and stats:
+            print(f"video: quality {self.vq:.0f}, link estimate {self.rate / 1e6:.2f} MB/s")
+        await super().report(stats, secs)
+        if self.video.skipped and self.args.verbose:
+            print(f"video: {self.video.skipped} frame(s) skipped, decoding fell behind")
+        self.video.skipped = 0
+
+    async def capture(self):
+        while self.frame is None:
+            await asyncio.sleep(0.02)
+        base = self.still if self.still is not None else self.frame
+        alpha = self.bar_alpha()
+        return await asyncio.to_thread(self.compose, base, alpha) if alpha > 0 else base
+
+    def bar_alpha(self):
+        if self.video.paused or self.seeking or not self.live:
+            return 1.0
+        return min(1.0, max(0.0, (self.bar_until - time.monotonic()) / BAR_FADE_S))
+
+    def bar_visible(self):
+        return self.bar_alpha() > 0
+
+    def compose(self, base, alpha):
+        """The frame with the position bar drawn over its bottom: a shade, the state and time, the file name, and
+        the progress line."""
+        v, img = self.video, base.copy()
+        region = img[H - BAR_H:].astype(np.float32)
+        shade = np.linspace(0, 0.65, BAR_H, dtype=np.float32) ** 1.3 * alpha
+        region *= 1 - shade[:, None, None]
+        layer = Image.new("RGBA", (W, BAR_H), (0, 0, 0, 0))
+        d = ImageDraw.Draw(layer)
+        pos = self.target if self.seeking else v.position()
+        dur = v.duration
+        hours = bool(dur and dur >= 3600)
+        ty = BAR_H - 66   # text baseline
+        if v.paused:                        # two bars: paused
+            d.rounded_rectangle((BAR_X0, ty - 20, BAR_X0 + 6, ty), 2, fill=(255, 255, 255, 255))
+            d.rounded_rectangle((BAR_X0 + 12, ty - 20, BAR_X0 + 18, ty), 2, fill=(255, 255, 255, 255))
+        else:                               # a triangle: playing
+            d.polygon([(BAR_X0, ty - 21), (BAR_X0, ty + 1), (BAR_X0 + 18, ty - 10)], fill=(255, 255, 255, 255))
+        text = clock_text(pos, hours) + (f" / {clock_text(dur, hours)}" if dur else "")
+        d.text((BAR_X0 + 34, ty), text, font=self.font, fill=(255, 255, 255, 255), anchor="ls")
+        x = BAR_X0 + 34 + d.textlength(text, font=self.font)
+        if self.seeking:
+            delta = self.target - self.down[3]
+            d.text((x + 16, ty), ("+" if delta >= 0 else "−") + clock_text(abs(delta)), font=self.small,
+                   fill=ACCENT + (255,), anchor="ls")
+        elif v.paused:
+            d.text((x + 16, ty), "Paused", font=self.small, fill=(255, 255, 255, 170), anchor="ls")
+        name = self.name
+        while len(name) > 4 and d.textlength(name, font=self.small) > W / 2:
+            name = name[:-2].rstrip() + "…" if not name.endswith("…") else name[:-2] + "…"
+        d.text((BAR_X1, ty), name, font=self.small, fill=(255, 255, 255, 170), anchor="rs")
+        if dur:
+            ly, thick = BAR_H - 32, 6 if self.seeking else 4
+            px = BAR_X0 + (BAR_X1 - BAR_X0) * min(1.0, max(0.0, pos / dur))
+            d.rounded_rectangle((BAR_X0, ly - thick // 2, BAR_X1, ly + thick // 2), thick // 2, fill=(255, 255, 255, 80))
+            d.rounded_rectangle((BAR_X0, ly - thick // 2, px, ly + thick // 2), thick // 2, fill=ACCENT + (255,))
+            r = 11 if self.seeking else 8
+            d.ellipse((px - r, ly - r, px + r, ly + r), fill=(255, 255, 255, 255))
+        rgba = np.asarray(layer).astype(np.float32)
+        a = rgba[..., 3:] / 255 * alpha
+        region = region * (1 - a) + rgba[..., :3] * a
+        img[H - BAR_H:] = region.clip(0, 255).astype(np.uint8)
+        return img
+
+    def seek_to(self, x):
+        dur, (x0, _, _, pos0) = self.video.duration, self.down
+        if self.on_bar:
+            t = (x - BAR_X0) / (BAR_X1 - BAR_X0) * dur
+        else:
+            t = pos0 + (x - x0) / W * min(dur, SEEK_SPAN_S)
+        # not into the last half second: letting go at the end plays the end, then loops
+        return min(max(t, 0.0), max(dur - 0.5, 0.0))
+
+    async def preview(self):
+        shown = None
+        while self.seeking:
+            if self.target != shown:
+                shown = self.target
+                frame = await asyncio.to_thread(self.video.grab, shown)
+                if self.seeking and frame is not None:
+                    self.still = frame
+                    self.dirty.set()
+            await asyncio.sleep(PREVIEW_S)
+
+    async def touch(self, kind, x, y):
+        now, v = time.monotonic(), self.video
+        if kind == EV_DOWN:
+            self.down = (x, y, now, v.position())
+            self.on_bar = bool(v.duration) and self.bar_visible() and y >= H - BAR_H
+        elif self.down is None:
+            return
+        elif kind == EV_MOVE:
+            if not self.seeking and v.duration and abs(x - self.down[0]) >= DRAG_PX:
+                self.seeking = True
+                v.halt("seek", True)
+                self.previewer = asyncio.create_task(self.preview())
+            if self.seeking:
+                self.target = self.seek_to(x)
+        elif kind == EV_UP:
+            if self.seeking:
+                self.seeking = False
+                v.halts.discard("seek")
+                v.start(self.target)
+            elif self.on_bar:   # a tap on the bar jumps there
+                v.start(self.seek_to(x))
+            else:
+                v.halt("pause", not v.paused)
+            self.down = None
+        if self.args.verbose:
+            print(f"touch {kind} {x},{y}: paused {v.paused} seeking {self.seeking} at {v.position():.1f} s")
+        self.bar_until = now + BAR_SHOW_S
+        self.touch_at = now
+        self.dirty.set()
+
+
+async def run_video(args, path, info, host):
+    audio = None if args.no_audio else AudioOut()
+    mirror = VideoMirror(args, audio, path, info)
+    duration, fps, has_sound = info
+    print(f"Tab5 Web Display {__version__}: playing {path.name} ("
+          f"{clock_text(duration) if duration else 'unknown length'}, {min(fps, VIDEO_FPS):.3g} fps, "
+          f"{'with' if has_sound and audio else 'no'} sound); tap the Tab5 to pause, drag sideways to seek")
+    mirror.video.start(0.0)
+    try:
+        await serve(mirror, host)
+    finally:
+        mirror.video.stop()
+
+
 async def watch_page(page, path):
     """Reload the page when a file next to it changes (handy while editing a page)."""
     def stamp():
@@ -520,9 +1010,24 @@ async def watch_page(page, path):
 
 
 def find_browser():
-    for name in ("chromium", "chromium-browser", "google-chrome-stable", "google-chrome"):
+    """Chromium, Chrome or Edge: on the PATH (Linux), or where their installers put them (Windows, macOS)."""
+    for name in ("chromium", "chromium-browser", "google-chrome-stable", "google-chrome", "chrome",
+                 "microsoft-edge-stable", "microsoft-edge", "msedge"):
         if path := shutil.which(name):
             return path
+    places = []   # Chrome first, then Chromium, then Edge, each wherever it is installed
+    if sys.platform == "win32":
+        roots = [r for r in map(os.environ.get, ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA")) if r]
+        for exe in ("Google/Chrome/Application/chrome.exe", "Chromium/Application/chrome.exe",
+                    "Microsoft/Edge/Application/msedge.exe"):
+            places += [pathlib.Path(root, exe) for root in roots]
+    elif sys.platform == "darwin":
+        for exe in ("Google Chrome.app/Contents/MacOS/Google Chrome", "Chromium.app/Contents/MacOS/Chromium",
+                    "Microsoft Edge.app/Contents/MacOS/Microsoft Edge"):
+            places += [root / exe for root in (pathlib.Path("/Applications"), pathlib.Path.home() / "Applications")]
+    for path in places:
+        if path.is_file():
+            return str(path)
     return None   # Playwright's own Chromium (playwright install chromium)
 
 
@@ -534,7 +1039,8 @@ async def main():
     what = ap.add_mutually_exclusive_group()
     what.add_argument("--app", default="home", help=f"built-in app: {', '.join(APPS)} (default home)")
     what.add_argument("--url", help="any web page")
-    what.add_argument("--file", help="a local HTML file (reloaded when it, or a file next to it, changes)")
+    what.add_argument("--file", help="a local HTML file (reloaded when it, or a file next to it, changes), or a video "
+                                     "file, played in a loop (needs ffmpeg): tap to pause, drag sideways to seek")
     ap.add_argument("--city", help="weather location for the dashboard (default New York; 'auto': from the PC's IP address)")
     ap.add_argument("--lat", type=float, help="weather location as coordinates (with --lon)")
     ap.add_argument("--lon", type=float)
@@ -548,11 +1054,15 @@ async def main():
     ap.add_argument("--quality", type=int, default=95,
                     help="JPEG quality once the page is still (default 95); moving parts are sent rougher first")
     ap.add_argument("--max-fps", type=float, default=60, help="cap on updates per second (default 60)")
-    ap.add_argument("--browser", default=find_browser(), help="Chromium/Chrome executable (default: found on PATH)")
+    ap.add_argument("--lanes", type=int, default=2, choices=[1, 2],
+                    help="TCP connections to spread the stream over, with firmware 1.3 or later (default 2; 1 = one "
+                         "connection, as before)")
+    ap.add_argument("--browser", default=find_browser(), help="Chromium, Chrome or Edge executable (default: found on the PATH or in the usual install folders)")
     ap.add_argument("--show", action="store_true", help="show the browser window too (for debugging)")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
 
+    video = None
     if args.url:
         url, watch = args.url, None
     elif args.file:
@@ -560,6 +1070,12 @@ async def main():
         if not watch.is_file():
             raise SystemExit(f"no such file: {watch}")
         url = watch.as_uri()
+        if watch.suffix.lower() not in PAGE_SUFFIXES:
+            if not (shutil.which("ffmpeg") and shutil.which("ffprobe")):
+                print("note: not a web page, and playing videos needs ffmpeg (with ffprobe) on the PATH; "
+                      "opening it in the browser")
+            elif info := probe_video(watch):
+                video = info
     else:
         name, _, query = args.app.partition("?")
         name = name.removesuffix(".html")
@@ -575,6 +1091,9 @@ async def main():
             raise SystemExit(f"--set needs KEY=VALUE, got {kv!r}")
         settings[k] = v
     host = args.device or device_ip_from_serial(args.port or find_serial_port())
+    if video:
+        await run_video(args, watch, video, host)
+        return
 
     audio = None if args.no_audio else SystemAudio()
     if audio and not audio.open():
@@ -650,24 +1169,28 @@ async def run(args, url, watch, settings, host, audio):
         if hasattr(signal, "SIGUSR1"):
             asyncio.get_running_loop().add_signal_handler(signal.SIGUSR1, dump_tasks)
         print(f"Tab5 Web Display {__version__}: showing {url}")
-        # While the Tab5's settings are open it accepts and closes connections; keep retrying quietly, and only
-        # report changes (connected, lost, a new kind of error).
-        last_error = None
-        while True:
-            try:
-                await mirror.session(host)
-                error = "closed the connection (settings open?)"
-            except asyncio.IncompleteReadError:
-                error = "closed the connection (settings open?)"
-            except (OSError, *TIMEOUTS) as e:
-                error = str(e) or type(e).__name__
-            if mirror.live:
-                print(f"Tab5 {error}; reconnecting")
-                mirror.live = False
-            elif error != last_error:
-                print(f"waiting for the Tab5 at {host}: {error}")
-            last_error = error
-            await asyncio.sleep(2)
+        await serve(mirror, host)
+
+
+async def serve(mirror, host):
+    """Mirror to the Tab5 for good. While its settings are open it accepts and closes connections; keep retrying
+    quietly, and only report changes (connected, lost, a new kind of error)."""
+    last_error = None
+    while True:
+        try:
+            await mirror.session(host)
+            error = "closed the connection (settings open?)"
+        except asyncio.IncompleteReadError:
+            error = "closed the connection (settings open?)"
+        except (OSError, *TIMEOUTS) as e:
+            error = str(e) or type(e).__name__
+        if mirror.live:
+            print(f"Tab5 {error}; reconnecting")
+            mirror.live = False
+        elif error != last_error:
+            print(f"waiting for the Tab5 at {host}: {error}")
+        last_error = error
+        await asyncio.sleep(2)
 
 
 if __name__ == "__main__":
