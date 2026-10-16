@@ -64,9 +64,15 @@ RECT_NS, STRIP_NS = 75, 27
 # lower quality saves data (q70: ~20 % less than q88) but hardly any drawing time.
 MOTION_S = 0.2
 ROUGH_SHARE = 0.75    # a piece goes out rough only if this share of its tiles is moving
-BIG_MOTION = 0.10     # moving parts at MOTION_Q_BIG when this share of the screen changes, else MOTION_Q_SMALL,
-MOTION_Q_BIG, MOTION_Q_SMALL = 70, 85   # where artifacts on small UI elements would show more
+BIG_MOTION = 0.10     # moving parts at an adapted quality (from MOTION_Q_BIG, see ADAPT_*) when this share of the
+MOTION_Q_BIG, MOTION_Q_SMALL = 70, 85   # screen changes, else MOTION_Q_SMALL, where artifacts on small UI elements show more
 MOTION_Q_MID = 88
+# Large motion (BIG_MOTION or more of the screen: a video, scrolling) adapts its quality to the link instead of a
+# fixed MOTION_Q_BIG: each frame should fit the measured link rate / the frame rate the content has. Detailed footage
+# measured 141 KB per frame at q70 and still 89 KB at q40 (which looks fine on the Tab5's 290 ppi panel); a bright,
+# glittering sea in a page 450-490 KB at q70, which held YouTube to 12-17 fps before.
+ADAPT_Q_MIN, ADAPT_Q_MAX = 35, 85
+ADAPT_RATE0, ADAPT_RATE_MAX = 2.5e6, 6e6   # bytes/s: the first guess, and the most the estimate can grow to
 REFINE_TILES = (H // TILE) * (W // TILE) // 10
 SOFT_MIN = 48         # 4:2:0 only for pieces this big both ways: the Tab5's decoder times out on smaller 4:2:0 images
 TOUCH_QUIET_S = 0.5   # ... but only one in flight this soon after a touch, where delay matters more than frame rate
@@ -281,9 +287,12 @@ def select_encoder(name):
                "library)" if name == "turbo+numba" else "Numba (pip install numba)"
         raise SystemExit(f"--encoder {name} needs {need}")
     encoder = ENCODERS[-1] if name == "auto" else name
-    if "numba" in encoder:
-        encode(np.zeros((16, 16, 3), np.uint8), 90, 2)
-        encode(np.zeros((16, 16, 3), np.uint8)[::-1].transpose(1, 0, 2), 90, 0)
+    if "numba" in encoder:   # every array type a piece can be: contiguous or a view, writable or not (decoded frames)
+        for writable in (True, False):
+            a = np.zeros((32, 32, 3), np.uint8)
+            a.setflags(write=writable)
+            for view in (a, a[:16, :16], a[::-1].transpose(1, 0, 2)):
+                encode(view, 90, 2)
 
 
 def piece_pixels(img, piece, flipped):
@@ -410,6 +419,7 @@ class Mirror:
         self.dirty = asyncio.Event()
         self.touch_at = None          # when the last touch event arrived, for the touch -> shown latency
         self.latest = None            # newest screencast frame (base64 PNG) not yet decoded
+        self.decoding = None          # the task decoding screencast frames
         self.frame = None             # newest decoded frame: what the page looks like now
         self.in_flight = collections.deque()   # (sent at, touch time or None) of updates not yet shown
         self.acked = asyncio.Event()
@@ -422,6 +432,10 @@ class Mirror:
         self.lane_offer, self.lane_answer, self.lane_answered = None, None, asyncio.Event()
         self.lanes, self.lane_readers, self.seq = [], [], 0   # lane writers, and the next chunk's number
         self.lanes_broken = False      # a lane setup failed: don't try again in this run
+        self.vq = float(MOTION_Q_BIG)  # quality of large motion, adapted to the link
+        self.rate = ADAPT_RATE0        # estimated link rate, bytes/s
+        self.frames_in, self.fps_in = 0, 30.0   # new frames from the source this second, and per second
+        self.ack_wait = 0.0            # seconds spent waiting for "shown" this second (the link, or the Tab5, is full)
 
     @staticmethod
     def decode_png(data):
@@ -430,21 +444,30 @@ class Mirror:
             img = img.resize((W, H))
         return np.asarray(img)
 
-    async def capture(self):
-        """What the page looks like now. Chromium's screencast sends a lossless frame every time it paints, so the
-        newest frame is always current; nothing else is asked of Chromium here. (Page.captureScreenshot while the
-        screencast runs occasionally never returned, which froze the whole mirror.)"""
-        if self.latest is None and self.frame is None:   # nothing painted yet: wait for the first frame
-            for _ in range(100):
-                await asyncio.sleep(0.05)
-                if self.latest is not None:
-                    break
-            else:
-                raise TimeoutError("no frame from Chromium")
-        if self.latest is not None:
+    def frame_arrived(self, data):
+        """A screencast frame (base64 PNG). It is decoded in the background, while the previous one is encoded and
+        sent: a detailed frame takes 20-40 ms to decode, and decoded only when needed it held a video in a page to
+        ~22 fps although Chromium painted 30. Frames that arrive during a decode collapse into the newest."""
+        self.latest = data
+        self.frames_in += 1
+        if self.decoding is None or self.decoding.done():
+            self.decoding = asyncio.create_task(self.decode_latest())
+
+    async def decode_latest(self):
+        while self.latest is not None:
             data, self.latest = self.latest, None
             self.frame = await asyncio.to_thread(self.decode_png, data)
-        return self.frame
+            self.dirty.set()
+
+    async def capture(self):
+        """What the page looks like now: the newest decoded screencast frame. Chromium sends a lossless frame every
+        time it paints, so nothing else is asked of it here. (Page.captureScreenshot while the screencast runs
+        occasionally never returned, which froze the whole mirror.)"""
+        for _ in range(100):   # nothing painted yet: wait for the first frame
+            if self.frame is not None:
+                return self.frame
+            await asyncio.sleep(0.05)
+        raise TimeoutError("no frame from Chromium")
 
     async def touch(self, kind, x, y):
         types = {EV_DOWN: "touchStart", EV_MOVE: "touchMove", EV_UP: "touchEnd"}
@@ -542,8 +565,14 @@ class Mirror:
                 t1 = time.monotonic()
                 top = self.args.quality
 
+                work = [0.0, 0.0]   # when the worker started and finished, for -v
+
+                changed = [0.0]
+
                 def diff_and_encode():   # in a worker thread, so touches, acks and sound keep flowing meanwhile
+                    work[0] = time.monotonic()
                     tiles = changed_tiles(prev, cur, exact=settle)
+                    changed[0] = tiles.mean()
                     changed_at[tiles] = t0
                     motion_q = self.motion_quality(tiles.mean())
                     pieces = []   # (piece, quality, subsampling)
@@ -568,11 +597,12 @@ class Mirror:
                     for piece, q, sub in pieces:
                         jpg = encode(piece_pixels(cur, piece, self.flipped), q, sub)
                         out += RECT.pack(b"TABS" if piece[0] == "strip" else b"TAB5", *piece[1:], len(jpg)) + jpg
+                    work[1] = time.monotonic()
                     return pieces, out
                 pieces, out = await asyncio.to_thread(diff_and_encode)
                 t2 = time.monotonic()
                 if moving and pieces:
-                    self.encoded(len(out))
+                    self.encoded(len(out), changed[0])
                 if pieces:
                     out += RECT.pack(b"TAB5", 0, 0, 0, 0, 0)
                     # at most one update in flight, or two during an animation (not right after a touch)
@@ -596,6 +626,7 @@ class Mirror:
                         self.touch_at = None
                     self.in_flight.append((time.monotonic(), touch_t))
                     t_send = time.monotonic()
+                    self.ack_wait += t_send - t_wait
                     await self.send(out)
                     t_sent = time.monotonic()
                     last_sent = t0
@@ -616,7 +647,7 @@ class Mirror:
                         print(f"{len(pieces) - n_strips} rect(s) {n_strips} strip(s), {n_rough} rough, "
                               f"{rough.sum()} rough tiles left "
                               f"{len(out) / 1024:6.1f} KB | decode {1000 * (t1 - t0):3.0f} ms "
-                              f"diff+encode {1000 * (t2 - t1):3.0f} ms in flight {len(self.in_flight)} | ack wait "
+                              f"diff+encode {1000 * (t2 - t1):3.0f} ms (start {1000 * (work[0] - t1):.1f} work {1000 * (work[1] - work[0]):.1f} resume {1000 * (t2 - work[1]):.1f}) in flight {len(self.in_flight)} | ack wait "
                               f"{1000 * (t_send - t_wait):4.0f} ms send {1000 * (t_sent - t_send):4.0f} ms")
                 elif touch_t is not None and t0 - touch_t > 1.0:
                     self.touch_at = None   # the touch changed nothing visible
@@ -686,13 +717,46 @@ class Mirror:
 
     def motion_quality(self, changed):
         """JPEG quality for the moving parts of an update in which this share of the screen changed."""
-        return min(self.args.quality, MOTION_Q_BIG if changed >= BIG_MOTION else MOTION_Q_SMALL)
+        return min(self.args.quality, round(self.vq) if changed >= BIG_MOTION else MOTION_Q_SMALL)
 
-    def encoded(self, size):
-        """Called with the size of each update sent during motion."""
+    def encoded(self, size, changed):
+        """After each update sent during motion: for large motion, step towards the quality whose frames fit the
+        budget (JPEG size roughly doubles from q40 to q80). Small steps, down faster than up: a page's frames vary a
+        lot from one to the next (a repeated video frame, a scene cut), and big steps made the quality swing between
+        its limits."""
+        if changed >= BIG_MOTION:
+            budget = self.rate / max(self.fps_in, 1.0)
+            step = min(2.0, max(-4.0, 4 * np.log2(budget / size)))
+            self.vq = min(ADAPT_Q_MAX, max(ADAPT_Q_MIN, self.vq + step))
+
+    def adapting(self):
+        """Whether this second's frame rate says something about the link (not while a video is paused)."""
+        return True
+
+    def adapt(self, stats, secs):
+        """Once a second: the frame rate the content has, and the link rate. What got through while frames were
+        missed for want of the link (the server spent a good part of the second waiting for "shown") is the link
+        rate; otherwise there may be more, so the estimate creeps up. Frames missed with no waiting were the PC's
+        doing (decoding Chromium's frames), and a lower quality would not bring them back. Only seconds of mostly
+        large motion count: a page's small animations say nothing about the link."""
+        self.fps_in = min(self.args.max_fps, self.frames_in / secs) if self.frames_in else self.fps_in
+        self.frames_in = 0
+        waited, self.ack_wait = self.ack_wait / secs, 0.0
+        big = sum(a >= BIG_MOTION * W * H for _, a, *_ in stats)
+        if not self.adapting() or big < 3 or big < 0.8 * len(stats):
+            return
+        fps, rate = len(stats) / secs, sum(b for b, *_ in stats) / secs
+        if fps < 0.9 * self.fps_in and waited > 0.25:
+            self.rate = 0.6 * self.rate + 0.4 * rate
+        else:
+            self.rate = min(self.rate * 1.05, ADAPT_RATE_MAX)
+        if self.args.verbose:
+            print(f"large motion: quality {self.vq:.0f}, link estimate {self.rate / 1e6:.2f} MB/s, "
+                  f"content {self.fps_in:.0f} fps, waited for the Tab5 {100 * waited:.0f}% of the time")
 
     async def report(self, stats, secs):
         """Once a second: print a summary of continuous activity and hand it to the page (window.tab5Stats)."""
+        self.adapt(stats, secs)
         n = len(stats)
         s = {"fps": n / secs, "kbps": sum(b for b, *_ in stats) / 1024 / secs,
              "area": 100 * sum(a for _, a, *_ in stats) / max(n, 1) / (W * H),
@@ -726,11 +790,6 @@ SEEK_SPAN_S = 120       # dragging across the whole screen seeks this far (throu
                         # dragging on the bar itself puts the position under the finger
 PREVIEW_S = 0.15        # while seeking, the frame at the drag position is shown at most this often
 ACCENT = (90, 226, 199)  # as in the Tab5's settings
-# Video frames change all over, so WiFi (about 2.5-3 MB/s) sets the frame rate. The quality of moving frames adapts
-# to fit each frame into the measured link rate / frame rate: detailed footage measured 141 KB per frame at q70 and
-# still 89 KB at q40 (which looks fine on the Tab5's 290 ppi panel), simple footage 43 KB at q70.
-VIDEO_Q_MIN, VIDEO_Q_MAX = 35, 85
-VIDEO_RATE0 = 2.5e6     # bytes/s assumed at the start
 PAGE_SUFFIXES = {".html", ".htm", ".xhtml", ".svg"}
 
 
@@ -921,14 +980,13 @@ class VideoMirror(Mirror):
         self.seeking, self.on_bar, self.target = False, False, 0.0
         self.bar_until = time.monotonic() + BAR_SHOW_S
         self.previewer = None
-        self.vq = 70.0               # quality of moving frames, adapted to fit the link
-        self.rate = VIDEO_RATE0      # estimated link rate, bytes/s
         self.font = ImageFont.load_default(size=26)
         self.small = ImageFont.load_default(size=21)
 
     def new_frame(self, gen, frame):
         if gen == self.video.gen:
             self.frame, self.still = frame, None
+            self.frames_in += 1
             self.dirty.set()
 
     def connected(self, up):
@@ -937,24 +995,10 @@ class VideoMirror(Mirror):
     async def push_stats(self, s):
         pass   # no page to show them
 
-    def motion_quality(self, changed):
-        return round(self.vq) if changed >= BIG_MOTION else super().motion_quality(changed)
-
-    def encoded(self, size):
-        # JPEG size roughly doubles from q40 to q80: step towards the quality whose frames fit the budget
-        budget = self.rate / self.video.fps
-        self.vq = min(VIDEO_Q_MAX, max(VIDEO_Q_MIN, self.vq + 10 * np.log2(budget / size)))
+    def adapting(self):
+        return not self.video.halts
 
     async def report(self, stats, secs):
-        # the link rate: what got through while frames were missed; otherwise there may be more, so probe upwards
-        if stats and not self.video.halts:
-            fps, rate = len(stats) / secs, sum(b for b, *_ in stats) / secs
-            if fps < 0.9 * self.video.fps:
-                self.rate = 0.6 * self.rate + 0.4 * rate
-            else:
-                self.rate = min(self.rate * 1.05, 4e6)
-        if self.args.verbose and stats:
-            print(f"video: quality {self.vq:.0f}, link estimate {self.rate / 1e6:.2f} MB/s")
         await super().report(stats, secs)
         if self.video.skipped and self.args.verbose:
             print(f"video: {self.video.skipped} frame(s) skipped, decoding fell behind")
@@ -1242,8 +1286,7 @@ async def run(args, url, watch, settings, host, audio):
 
         # Chromium sends a (lossless) frame whenever it paints; keep only the newest.
         async def on_frame(ev):
-            mirror.latest = ev["data"]
-            mirror.dirty.set()
+            mirror.frame_arrived(ev["data"])
             await cdp.send("Page.screencastFrameAck", {"sessionId": ev["sessionId"]})
         cdp.on("Page.screencastFrame", on_frame)
         await cdp.send("Page.startScreencast", {"format": "png", "maxWidth": W, "maxHeight": H})

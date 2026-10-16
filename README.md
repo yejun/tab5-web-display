@@ -192,14 +192,17 @@ PC: server/server.py                                    Tab5: firmware/web_displ
 ```
 
 **On the PC:**
-- **Frames:** Chromium streams a lossless frame whenever it repaints. The server compares it with what the Tab5
-  shows and finds the changed 16×16 tiles.
+- **Frames:** Chromium streams a lossless frame whenever it repaints. Each is decoded in the background while the
+  previous one is encoded and sent (a detailed frame takes 20–40 ms to decode). The server compares it with what
+  the Tab5 shows and finds the changed 16×16 tiles.
 - **Rectangles or strips:** small changes go out as tight rectangles. Large ones go out as full-height strips,
   already rotated into the panel's orientation, which the Tab5 decodes straight into its frame buffer. The server
   picks whichever the Tab5 draws faster.
 - **Quality:** pieces are baseline JPEG. Still content goes out at quality 95 with full-resolution colour (4:4:4),
-  so text stays sharp. During an animation, mostly-moving pieces go out rough: quality 70 (85 for small changes)
-  with half-resolution colour (4:2:0), which the Tab5 draws about 40 % faster; other pieces at quality 88. Every
+  so text stays sharp. During an animation, mostly-moving pieces go out rough, with half-resolution colour (4:2:0),
+  which the Tab5 draws about 40 % faster: quality 85 for small changes; for large ones (a video, scrolling) a
+  quality between 35 and 85 that adapts so each frame fits the measured WiFi rate divided by the content's frame
+  rate. It only goes down when the server actually waits for the Tab5; other pieces at quality 88. Every
   tile sent below the top quality is sent again at quality 95 once it has stood still for 0.5 s, the oldest first
   and a tenth of the screen per update while something else still moves. So a page at rest is always at top
   quality.

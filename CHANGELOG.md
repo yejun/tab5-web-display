@@ -29,6 +29,13 @@ Versions follow [semantic versioning](https://semver.org). The firmware prints i
   with Numba, 4.0 with both; the server's CPU on video dropped from 48 % of a core to 35 % and 27 %. It is also the
   exact conversion: Pillow's double rounding shifted colours by up to a level. The fastest installed encoder is
   used; `--encoder` picks one.
+- **Videos in web pages (YouTube) adapt their quality** like the video player: large moving areas go out at a
+  quality between 35 and 85 that fits the measured WiFi rate, instead of a fixed 70. It is lowered only while the
+  server actually waits for the Tab5, so frames lost elsewhere don't cost picture quality.
+- **Page frames are decoded in the background,** while the previous one is encoded and sent. A detailed frame takes
+  20–40 ms to decode, and decoding only when needed held a video in a page to about 21 fps although Chromium painted
+  30. Together: 25–26 fps at quality 52–62 (was 21 fps at 70).
+- **Fix: the first page frame stalled ~0.4 s** while Numba compiled for read-only arrays; it is compiled at start.
 - **`wifiinfo` serial command:** shows whether the Tab5 uses WiFi 4 or WiFi 6. It does WiFi 6 only on a 2.4 GHz
   network that offers it on 20 MHz channels; a router's "force WiFi 4" for IoT networks costs throughput.
 - **Statistics:** the serial `S` output includes lane and internal-memory figures.
