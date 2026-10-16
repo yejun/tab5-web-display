@@ -186,16 +186,104 @@ def plan(tiles, strips):
 
 
 # The P4's JPEG decoder expands "TV range" BT.601 YCbCr (Y 16-235, Cb/Cr 16-240) to RGB, while JPEG writers use
-# the full 0-255 range; encoding full range crushes dark greys to black. So convert to TV range ourselves: Pillow's
-# RGB -> YCbCr is full-range BT.601, and squeezing each channel into TV range is a per-channel lookup table.
+# the full 0-255 range; encoding full range crushes dark greys to black. So the server converts to TV range itself.
+# Three encoders; the fastest one installed is used (or --encoder). Measured on a full-screen video strip / a
+# full-screen text page at q95:
+#  - "turbo+numba" (PyTurboJPEG and Numba): a Numba kernel computes the TV-range planes straight from the piece, even a
+#    strip's rotated view, and TurboJPEG encodes them: 4.0 / 5.7 ms. On video the server's CPU dropped from 48 % of
+#    a core to 27 %.
+#  - "numba" (Numba only): the same conversion into a YCbCr image, which Pillow encodes: 7.2 / 6.7 ms.
+#  - "pillow": Pillow's full-range YCbCr, squeezed per channel by a lookup table: 13.3 / 8.2 ms.
+# The Numba conversion is also the exact one: Pillow's double rounding shifts every channel by up to a level.
 TV_RANGE = [round(16 + v * 219 / 255) for v in range(256)] + [round(128 + (v - 128) * 224 / 255) for v in range(256)] * 2
+try:
+    import turbojpeg
+    _turbo = turbojpeg.TurboJPEG()
+    _TJSAMP = {0: turbojpeg.TJSAMP_444, 2: turbojpeg.TJSAMP_420}
+except Exception:   # not installed, or the libturbojpeg library is missing
+    _turbo = None
+try:
+    import numba
+except ImportError:
+    numba = None
+
+if numba:
+    @numba.njit(cache=True, nogil=True)
+    def tv_planes(px, sub):
+        """TV-range BT.601 Y, Cb, Cr planes (Cb/Cr at half resolution with sub 2) of an RGB array, in one buffer.
+        16.16 fixed point; the same numbers as Pillow's full-range conversion squeezed into 16-235 / 16-240."""
+        h, w = px.shape[0], px.shape[1]
+        cw, ch = (w // 2, h // 2) if sub == 2 else (w, h)
+        out = np.empty(h * w + 2 * cw * ch, np.uint8)
+        for i in range(h):
+            for j in range(w):
+                r, g, b = np.int32(px[i, j, 0]), np.int32(px[i, j, 1]), np.int32(px[i, j, 2])
+                out[i * w + j] = (16829 * r + 33039 * g + 6416 * b + 1081344) >> 16
+        cb0, cr0 = h * w, h * w + cw * ch
+        if sub == 2:   # average 2x2 pixels, then convert
+            for i in range(ch):
+                for j in range(cw):
+                    r = np.int32(0)
+                    g = np.int32(0)
+                    b = np.int32(0)
+                    for di in range(2):
+                        for dj in range(2):
+                            r += px[2 * i + di, 2 * j + dj, 0]
+                            g += px[2 * i + di, 2 * j + dj, 1]
+                            b += px[2 * i + di, 2 * j + dj, 2]
+                    out[cb0 + i * cw + j] = (-9714 * r - 19071 * g + 28784 * b + 33685504) >> 18
+                    out[cr0 + i * cw + j] = (28784 * r - 24103 * g - 4681 * b + 33685504) >> 18
+        else:
+            for i in range(h):
+                for j in range(w):
+                    r, g, b = np.int32(px[i, j, 0]), np.int32(px[i, j, 1]), np.int32(px[i, j, 2])
+                    out[cb0 + i * w + j] = (-9714 * r - 19071 * g + 28784 * b + 8421376) >> 16
+                    out[cr0 + i * w + j] = (28784 * r - 24103 * g - 4681 * b + 8421376) >> 16
+        return out
+
+    @numba.njit(cache=True, nogil=True)
+    def tv_ycbcr(px):
+        """The TV-range YCbCr image of an RGB array, for Pillow to encode."""
+        h, w = px.shape[0], px.shape[1]
+        out = np.empty((h, w, 3), np.uint8)
+        for i in range(h):
+            for j in range(w):
+                r, g, b = np.int32(px[i, j, 0]), np.int32(px[i, j, 1]), np.int32(px[i, j, 2])
+                out[i, j, 0] = (16829 * r + 33039 * g + 6416 * b + 1081344) >> 16
+                out[i, j, 1] = (-9714 * r - 19071 * g + 28784 * b + 8421376) >> 16
+                out[i, j, 2] = (28784 * r - 24103 * g - 4681 * b + 8421376) >> 16
+        return out
+
+ENCODERS = ["pillow"] + (["numba"] if numba else []) + (["turbo+numba"] if _turbo and numba else [])
+encoder = ENCODERS[-1]
 
 
 def encode(pixels, quality, subsampling):
-    ycc = Image.fromarray(np.ascontiguousarray(pixels)).convert("YCbCr").point(TV_RANGE)
+    if encoder == "turbo+numba":
+        h, w = pixels.shape[:2]
+        return _turbo.encode_from_yuv(tv_planes(pixels, subsampling), h, w, quality=quality,
+                                      jpeg_subsample=_TJSAMP[subsampling])
+    if encoder == "numba":
+        ycc = Image.fromarray(tv_ycbcr(pixels), "YCbCr")
+    else:
+        ycc = Image.fromarray(np.ascontiguousarray(pixels)).convert("YCbCr").point(TV_RANGE)
     buf = io.BytesIO()
     ycc.save(buf, "JPEG", quality=quality, subsampling=subsampling)
     return buf.getvalue()
+
+
+def select_encoder(name):
+    """Use the named encoder ("auto": the fastest installed), and compile Numba's kernel now rather than on the
+    first frame (about a second the first time, then cached next to this file)."""
+    global encoder
+    if name != "auto" and name not in ENCODERS:
+        need = "PyTurboJPEG and Numba (pip install PyTurboJPEG numba; PyTurboJPEG also needs the libjpeg-turbo " \
+               "library)" if name == "turbo+numba" else "Numba (pip install numba)"
+        raise SystemExit(f"--encoder {name} needs {need}")
+    encoder = ENCODERS[-1] if name == "auto" else name
+    if "numba" in encoder:
+        encode(np.zeros((16, 16, 3), np.uint8), 90, 2)
+        encode(np.zeros((16, 16, 3), np.uint8)[::-1].transpose(1, 0, 2), 90, 0)
 
 
 def piece_pixels(img, piece, flipped):
@@ -1054,6 +1142,9 @@ async def main():
     ap.add_argument("--quality", type=int, default=95,
                     help="JPEG quality once the page is still (default 95); moving parts are sent rougher first")
     ap.add_argument("--max-fps", type=float, default=60, help="cap on updates per second (default 60)")
+    ap.add_argument("--encoder", choices=["auto", "pillow", "numba", "turbo+numba"], default="auto",
+                    help="JPEG encoder (default auto: turbo+numba with PyTurboJPEG and Numba installed, numba with "
+                         "Numba, else pillow)")
     ap.add_argument("--lanes", type=int, default=2, choices=[1, 2],
                     help="TCP connections to spread the stream over, with firmware 1.3 or later (default 2; 1 = one "
                          "connection, as before)")
@@ -1091,6 +1182,9 @@ async def main():
             raise SystemExit(f"--set needs KEY=VALUE, got {kv!r}")
         settings[k] = v
     host = args.device or device_ip_from_serial(args.port or find_serial_port())
+    select_encoder(args.encoder)
+    print(f"JPEG encoder: {encoder}" + ("" if encoder == "turbo+numba" else
+          " (faster with PyTurboJPEG and Numba installed, see the README)"))
     if video:
         await run_video(args, watch, video, host)
         return

@@ -3,3 +3,6 @@ playwright>=1.40
 numpy>=1.21
 Pillow>=9.1
 pyserial>=3.5
+# Optional, for faster JPEG encoding (on video about half the server's CPU), see the README:
+#   numba            (the colour conversion compiled; a plain pip install)
+#   PyTurboJPEG      (with numba: the fastest; needs the libjpeg-turbo library)

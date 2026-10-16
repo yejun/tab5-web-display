@@ -24,6 +24,11 @@ Versions follow [semantic versioning](https://semver.org). The firmware prints i
 - **Nudges (firmware):** with the stream on the lanes, a lost event from the Tab5 (a "shown" or a touch) waited for
   lwIP's retransmission timer, over a second. While the page is busy the Tab5 now sends a tiny event after each
   one, so a loss is resent at once.
+- **Faster encoding (optional):** with Numba installed the colour conversion is compiled, and with PyTurboJPEG too
+  the JPEG goes through TurboJPEG's own interface. Encoding a full-screen video frame: 13.3 ms with Pillow, 7.2
+  with Numba, 4.0 with both; the server's CPU on video dropped from 48 % of a core to 35 % and 27 %. It is also the
+  exact conversion: Pillow's double rounding shifted colours by up to a level. The fastest installed encoder is
+  used; `--encoder` picks one.
 - **`wifiinfo` serial command:** shows whether the Tab5 uses WiFi 4 or WiFi 6. It does WiFi 6 only on a 2.4 GHz
   network that offers it on 20 MHz channels; a router's "force WiFi 4" for IoT networks costs throughput.
 - **Statistics:** the serial `S` output includes lane and internal-memory figures.

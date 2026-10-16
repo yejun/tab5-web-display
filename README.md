@@ -46,6 +46,10 @@ Version 1.2.2 (firmware 1.2.0) · MIT licence
   folders on Windows and macOS. If none is installed, Playwright can download its own Chromium.
 - **For sound:** Linux with PulseAudio or PipeWire, and its `pactl` and `parec` tools (packages `pulseaudio-utils`
   or `libpulse`). Without them everything else works, silently.
+- **Optional, for a lighter server:** `pip install numba`, or `pip install numba PyTurboJPEG` for the fastest
+  encoding (PyTurboJPEG also needs the libjpeg-turbo library: `libjpeg-turbo` on Arch, `libturbojpeg0` on
+  Debian/Ubuntu, `brew install jpeg-turbo` on macOS, the libjpeg-turbo installer on Windows). The server picks the
+  fastest one installed and prints which.
 - **For videos:** [ffmpeg](https://ffmpeg.org) (with `ffprobe`) on the PATH. Video sound needs no PulseAudio.
 - **To build the firmware:** [Arduino CLI](https://arduino.github.io/arduino-cli/).
 
@@ -144,6 +148,7 @@ screen and plays in a loop.
 | `--power-save auto\|off` | Tab5 WiFi power save. `auto` (default): off only while you touch, the page animates or sound plays. `off`: always off, for the quickest response but shorter battery life |
 | `--quality N` | JPEG quality once the page is still, default 95 (moving parts are sent rougher first) |
 | `--max-fps N` | cap on updates per second, default 60 |
+| `--encoder E` | JPEG encoder: `auto` (default, the fastest installed), `pillow`, `numba` or `turbo+numba` |
 | `--lanes N` | TCP connections to spread the stream over (firmware 1.3 or later): `2` (default) or `1`, a single connection |
 | `--show` | also open a visible browser window |
 | `-v` | log every update |
@@ -227,6 +232,18 @@ video changes the whole screen every frame, so WiFi (about 2.5–3 MB/s) sets th
 adapts to fit the measured link rate divided by the frame rate, between 35 and 85 (detailed footage measured
 141 KB per frame at quality 70 and 89 KB at 40, which still looks fine at the panel's 290 ppi). Sound is
 a few tens of milliseconds behind the picture at most.
+
+**Encoders:** a frame's changed pieces are converted to TV-range YCbCr and encoded as JPEG in a worker thread.
+
+| encoder | needs | video strip / text page (encode) | server CPU, video / motion test |
+|---|---|---|---|
+| `pillow` | nothing extra | 13.3 / 8.2 ms | 48 % / 80 % of a core |
+| `numba` | `numba` | 7.2 / 6.7 ms | 35 % / 75 % |
+| `turbo+numba` | `numba`, `PyTurboJPEG`, libjpeg-turbo | 4.0 / 5.7 ms | 27 % / 71 % |
+
+The Numba kernel reads a strip in its rotated order directly, and its colour conversion is exact (Pillow's double
+rounding shifts each channel by up to a level). Frame rates stay the same: the Tab5 and WiFi set them. On pages
+most of the server's time goes into decoding Chromium's lossless PNG frames (about 9 ms each).
 
 **Lanes (firmware 1.3):** one TCP connection to the Tab5 carries at most about 3 MB/s, because its 64 KB receive
 window is fixed in the precompiled network stack (Linux reported the connection held back by it half the time).
