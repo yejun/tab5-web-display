@@ -1,8 +1,11 @@
 // The Tab5 Keyboard (M5Stack A164): an STM32 on Ext.Port1 that scans a 5 x 14 key matrix and queues press/release
 // events, read over I2C (address 0x6D, SDA G0, SCL G1; INT G50 goes low while events are queued).
-// It is used in its "normal" mode, which reports each key going down and up. The Sym and Aa layers are applied here,
+// It is used in its "normal" mode, which reports each key going down and up. The Sym and Aa layers are applied here
+// (Aa: capitals, and Shift on keys that don't type, e.g. Shift+arrows to select; Sym: the second symbol printed on
+// a key, and Home/End/Page Up/Page Down/Delete on the arrows and Backspace),
 // and keys go to the PC as USB HID usage codes with a modifier byte, which the server turns into browser key events.
 // In the settings panel, keys type into the WiFi dialog instead.
+// Its two lights are ours (see kbd_leds): the left one shows Sym / Aa held, the right one the connection.
 // Plugging the keyboard in or out while running is noticed within KBD_PROBE_MS.
 #pragma once
 
@@ -11,7 +14,8 @@ static constexpr int KBD_SDA = 0, KBD_SCL = 1, KBD_INT = 50;
 static constexpr uint32_t KBD_FREQ = 400000;
 static constexpr int64_t KBD_PROBE_MS = 2000;   // look for a keyboard this often while none answers
 static constexpr int64_t KBD_POLL_MS = 100;     // read the queue at least this often, should an INT edge be missed
-enum : uint8_t { KBD_REG_EVENT_NUM = 0x02, KBD_REG_MODE = 0x10, KBD_REG_KEY_EVENT = 0x20, KBD_REG_VERSION = 0xFE };
+enum : uint8_t { KBD_REG_EVENT_NUM = 0x02, KBD_REG_BRIGHTNESS = 0x03, KBD_REG_MODE = 0x10, KBD_REG_RGB_MODE = 0x11,
+                 KBD_REG_RGB1 = 0x60, KBD_REG_RGB2 = 0x64, KBD_REG_KEY_EVENT = 0x20, KBD_REG_VERSION = 0xFE };
 enum : uint8_t { KMOD_CTRL = 0x01, KMOD_SHIFT = 0x02, KMOD_ALT = 0x04 };   // HID modifier bits
 
 // HID usage code and forced modifier of each key, row by row (from M5Stack's M5Unit-KEYBOARD library), and of
@@ -35,10 +39,12 @@ static const KbdKey KBD_BASE[70] = {
   {0x50, 0}, {0x51, 0}, {0x4F, 0}, {0x2C, 0},
 };
 // The Sym layer differs only here: ` ~  ! ?  * /  ( <  ) >  [ {  ] }  \ |  ; :  ' "  _ =  . ,
+// and Left Home, Right End, Up Page Up, Down Page Down, Backspace Delete (keys the keyboard lacks)
 struct KbdSym { uint8_t idx; KbdKey key; };
 static const KbdSym KBD_SYM[] = {
   {14, {0x35, 2}}, {15, {0x38, 2}}, {22, {0x38, 0}}, {23, {0x36, 2}}, {24, {0x37, 2}}, {25, {0x2F, 2}},
   {26, {0x30, 2}}, {27, {0x31, 2}}, {39, {0x33, 2}}, {40, {0x34, 2}}, {54, {0x2E, 0}}, {65, {0x36, 0}},
+  {66, {0x4A, 0}}, {68, {0x4D, 0}}, {53, {0x4B, 0}}, {67, {0x4E, 0}}, {41, {0x4C, 0}},
 };
 static constexpr uint8_t KIDX_SYM = 42, KIDX_AA = 43, KIDX_CTRL = 56, KIDX_ALT = 57;
 
@@ -51,6 +57,7 @@ struct Kbd {
   KbdKey down[70] = {};           // what each held key was sent as, so its release matches even if Sym changed
   uint32_t keys = 0;              // key events read, for the stats
   uint32_t probes = 0, probe_us_max = 0;   // looking for a keyboard: how often, and the longest it took
+  uint32_t led[2] = {~0u, ~0u};   // colour last set on each light (0xRRGGBB); ~0: unknown, set it again
 };
 static Kbd g_kbd;
 
@@ -75,6 +82,8 @@ static void kbd_type_in_panel(KbdKey k) {
   else if (k.code == 0x4C) { if (ta) lv_textarea_delete_char_forward(ta); }
   else if (k.code == 0x50) { if (ta) lv_textarea_cursor_left(ta); }
   else if (k.code == 0x4F) { if (ta) lv_textarea_cursor_right(ta); }
+  else if (k.code == 0x4A) { if (ta) lv_textarea_set_cursor_pos(ta, 0); }
+  else if (k.code == 0x4D) { if (ta) lv_textarea_set_cursor_pos(ta, LV_TEXTAREA_CURSOR_LAST); }
   else if (c == '\t') {   // to the other field, if it is shown
     lv_obj_t* other = ta == ui_ta_ssid ? ui_ta_pass : ui_ta_ssid;
     if (!lv_obj_has_flag(other, LV_OBJ_FLAG_HIDDEN)) {
@@ -106,7 +115,10 @@ static void kbd_event(uint8_t raw) {
     if (g_kbd.sym)
       for (const KbdSym& s : KBD_SYM)
         if (s.idx == i) k = s.key;
-    if (g_kbd.aa) k.mod |= KMOD_SHIFT;
+    // Aa is Shift only where that is unsurprising: a letter, or a key that doesn't type. On a symbol or digit key, US
+    // Shift would type a character that isn't printed on it (. would give >); Sym gives the printed one.
+    const bool symbol = (k.code >= 0x1E && k.code <= 0x27) || (k.code >= 0x2D && k.code <= 0x38);
+    if (g_kbd.aa && !symbol) k.mod |= KMOD_SHIFT;
     if (g_kbd.ctrl) k.mod |= KMOD_CTRL;
     if (g_kbd.alt) k.mod |= KMOD_ALT;
     g_kbd.down[i] = k;
@@ -126,8 +138,43 @@ static bool kbd_probe() {
   if (!M5.Ex_I2C.scanID(KBD_ADDR, KBD_FREQ)) return false;
   g_kbd.version = M5.Ex_I2C.readRegister8(KBD_ADDR, KBD_REG_VERSION, KBD_FREQ);
   // normal mode, and an empty queue (writing 0 to the count clears it)
+  // and the lights ours, at the brightness from the settings (it scales every colour; 0 = off)
+  g_kbd.led[0] = g_kbd.led[1] = ~0u;
   return M5.Ex_I2C.writeRegister8(KBD_ADDR, KBD_REG_MODE, 0, KBD_FREQ) &&
-         M5.Ex_I2C.writeRegister8(KBD_ADDR, KBD_REG_EVENT_NUM, 0, KBD_FREQ);
+         M5.Ex_I2C.writeRegister8(KBD_ADDR, KBD_REG_EVENT_NUM, 0, KBD_FREQ) &&
+         M5.Ex_I2C.writeRegister8(KBD_ADDR, KBD_REG_RGB_MODE, 1, KBD_FREQ) &&
+         M5.Ex_I2C.writeRegister8(KBD_ADDR, KBD_REG_BRIGHTNESS, g_kled, KBD_FREQ);
+}
+
+// The lights. Left: off, white while Aa is held, amber while Sym is (alternating with both). Right: green while a
+// PC is connected, dim blue with WiFi up and no PC, amber without WiFi, blinking red below 10 % battery.
+// Colours are written only when they change.
+static constexpr uint32_t LED_OFF = 0, LED_WHITE = 0xFFFFFF, LED_AMBER = 0xFF8000, LED_GREEN = 0x00FF00,
+                          LED_IDLE = 0x000040, LED_RED = 0xFF0000;
+
+static void kbd_set_light(uint8_t level) {   // from the settings slider
+  g_kled = level;
+  if (g_kbd.present) M5.Ex_I2C.writeRegister8(KBD_ADDR, KBD_REG_BRIGHTNESS, level, KBD_FREQ);
+}
+
+static bool kbd_led(int i, uint32_t rgb) {
+  if (g_kbd.led[i] == rgb) return true;
+  const uint8_t bgr[3] = {(uint8_t)rgb, (uint8_t)(rgb >> 8), (uint8_t)(rgb >> 16)};   // registers: B, G, R
+  const uint8_t reg = i ? KBD_REG_RGB2 : KBD_REG_RGB1;
+  for (int c = 0; c < 3; ++c)
+    if (!M5.Ex_I2C.writeRegister8(KBD_ADDR, reg + c, bgr[c], KBD_FREQ)) return false;
+  g_kbd.led[i] = rgb;
+  return true;
+}
+
+static bool kbd_leds(int64_t now) {
+  const Kbd& k = g_kbd;
+  const bool blink = (now / 400) % 2;
+  const uint32_t left = k.aa && k.sym ? (blink ? LED_WHITE : LED_AMBER) : k.aa ? LED_WHITE : k.sym ? LED_AMBER : LED_OFF;
+  uint32_t right = g_have_client ? LED_GREEN : g_wifi == WIFI_UP ? LED_IDLE : LED_AMBER;
+  const Battery& b = g_batt;
+  if (b.presence.state == BatteryPresence::Present && b.level < 10 && !b.charging) right = (now / 500) % 2 ? LED_RED : LED_OFF;
+  return kbd_led(0, left) && kbd_led(1, right);
 }
 
 static void kbd_release_all() {   // keys held when the keyboard went away, or the connection changed
@@ -157,10 +204,11 @@ static void kbd_poll() {
     k.fails = 0;
     Serial.printf("keyboard found (firmware 0x%02X)\n", k.version);
   }
-  if (digitalRead(KBD_INT) == HIGH && now < k.next_poll) return;
+  bool ok = kbd_leds(now);
+  if (ok && digitalRead(KBD_INT) == HIGH && now < k.next_poll) return;
   k.next_poll = now + KBD_POLL_MS;
   uint8_t n = 0;
-  bool ok = M5.Ex_I2C.readRegister(KBD_ADDR, KBD_REG_EVENT_NUM, &n, 1, KBD_FREQ);
+  ok = ok && M5.Ex_I2C.readRegister(KBD_ADDR, KBD_REG_EVENT_NUM, &n, 1, KBD_FREQ);
   for (int j = 0; ok && j < n && j < 32; ++j) {
     uint8_t raw = 0xFF;
     ok = M5.Ex_I2C.readRegister(KBD_ADDR, KBD_REG_KEY_EVENT, &raw, 1, KBD_FREQ);

@@ -83,6 +83,7 @@ static int64_t g_last_update = 0, g_last_stream = -AWAKE_AFTER_STREAM_MS;
 static bool g_wifi_sleep = true;
 static uint8_t g_power_mode = 0;          // from the PC: 0 = auto, 1 = power save always off
 static bool g_multitouch = false;         // from the PC: it takes every finger
+static uint8_t g_kled = 10;               // keyboard light brightness, 0 (off) to 100
 
 enum WifiState { WIFI_NONE, WIFI_CONNECTING, WIFI_UP, WIFI_FAILED };
 static WifiState g_wifi = WIFI_NONE;
@@ -101,6 +102,7 @@ static Stats g_stats = {};
 
 static int64_t now_ms() { return esp_timer_get_time() / 1000; }
 static void panel_open();
+static void kbd_set_light(uint8_t level);
 
 #include "audio.h"
 
@@ -672,6 +674,14 @@ static void handle_serial() {
     } else if (line == "rot") {
       set_rotation(g_rot == 1 ? 3 : 1);
       Serial.printf("rotation %d\n", g_rot);
+    } else if (line.startsWith("kbw ") || line.startsWith("kbr ")) {   // keyboard register: kbw <reg> <value> | kbr <reg> (hex)
+      unsigned reg = 0, val = 0;
+      const int n = sscanf(line.c_str() + 4, "%x %x", &reg, &val);
+      bool ok = true;
+      if (line[2] == 'w' && n == 2) ok = M5.Ex_I2C.writeRegister8(KBD_ADDR, reg, val, KBD_FREQ);
+      uint8_t v = 0;
+      ok = ok && M5.Ex_I2C.readRegister(KBD_ADDR, reg, &v, 1, KBD_FREQ);
+      Serial.printf("kb reg 0x%02X = 0x%02X%s\n", reg, v, ok ? "" : " (I2C error)");
     } else if (line == "rot auto") {   // forget the saved rotation: from the next start, it follows the keyboard
       prefs.remove("rot");
       Serial.println("rotation: none saved, chosen at the next start");
@@ -700,6 +710,7 @@ void setup() {
   prefs.begin("webdisp", false);
   // The rotation the flip switch saved, or with none saved, upright for how the Tab5 is likely held: docked in
   // M5Stack's keyboard, that is flipped (as in M5Stack's own keyboard examples).
+  g_kled = (uint8_t)min((int)prefs.getUChar("kled", 10), 100);
   kbd_begin();
   const bool auto_rot = !prefs.isKey("rot");
   g_rot = auto_rot ? (kbd_present_at_boot() ? 3 : 1) : prefs.getInt("rot", 1) == 3 ? 3 : 1;

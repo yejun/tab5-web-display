@@ -15,7 +15,7 @@ static int g_net_count = 0;
 static lv_display_t* g_disp;
 static lv_obj_t *ui_wifi, *ui_addr, *ui_pc, *ui_hint, *ui_list, *ui_scan_btn, *ui_scan_lbl;
 static lv_obj_t *ui_modal, *ui_modal_title, *ui_ta_ssid, *ui_ta_pass, *ui_show_btn, *ui_msg, *ui_spinner, *ui_kb;
-static lv_obj_t *ui_connect_btn, *ui_bri, *ui_vol, *ui_flip, *ui_batt;
+static lv_obj_t *ui_connect_btn, *ui_bri, *ui_vol, *ui_kled, *ui_flip, *ui_batt;
 static bool g_scanning = false, g_connect_pending = false, g_touch_block = false;
 static String g_pending_ssid;   // the network the dialog is joining
 
@@ -371,6 +371,7 @@ static void panel_open() {
   g_touch_block = read_touch().pressed;
   lv_slider_set_value(ui_bri, g_bri, LV_ANIM_OFF);
   lv_slider_set_value(ui_vol, g_vol, LV_ANIM_OFF);
+  lv_slider_set_value(ui_kled, g_kled, LV_ANIM_OFF);
   if (g_rot == 3) lv_obj_add_state(ui_flip, LV_STATE_CHECKED);
   else lv_obj_remove_state(ui_flip, LV_STATE_CHECKED);
   ui_refresh_status();
@@ -434,13 +435,13 @@ static void ui_setup() {
   lv_obj_set_width(ui_hint, lv_pct(100));
 
   // display
-  lv_obj_t* dc = ui_card(scr, 32, 396, 410, 190);
+  lv_obj_t* dc = ui_card(scr, 32, 392, 410, 222);
   lv_obj_t* bl = ui_label(dc, "Brightness", &lv_font_montserrat_20, C_INK);
-  lv_obj_set_pos(bl, 0, 6);
+  lv_obj_set_pos(bl, 0, 4);
   ui_bri = lv_slider_create(dc);
   lv_slider_set_range(ui_bri, 10, 255);
   lv_obj_set_size(ui_bri, 210, 16);
-  lv_obj_set_pos(ui_bri, 150, 10);
+  lv_obj_set_pos(ui_bri, 150, 8);
   lv_obj_set_ext_click_area(ui_bri, 20);
   lv_obj_add_event_cb(ui_bri, [](lv_event_t*) {
     g_bri = (uint8_t)lv_slider_get_value(ui_bri);
@@ -448,11 +449,11 @@ static void ui_setup() {
   }, LV_EVENT_VALUE_CHANGED, nullptr);
   lv_obj_add_event_cb(ui_bri, [](lv_event_t*) { prefs.putUChar("bri", g_bri); }, LV_EVENT_RELEASED, nullptr);
   lv_obj_t* vl = ui_label(dc, "Volume", &lv_font_montserrat_20, C_INK);
-  lv_obj_set_pos(vl, 0, 56);
+  lv_obj_set_pos(vl, 0, 48);
   ui_vol = lv_slider_create(dc);
   lv_slider_set_range(ui_vol, 0, 255);
   lv_obj_set_size(ui_vol, 210, 16);
-  lv_obj_set_pos(ui_vol, 150, 60);
+  lv_obj_set_pos(ui_vol, 150, 52);
   lv_obj_set_ext_click_area(ui_vol, 20);
   lv_obj_add_event_cb(ui_vol, [](lv_event_t*) { set_volume((uint8_t)lv_slider_get_value(ui_vol), false); },
                       LV_EVENT_VALUE_CHANGED, nullptr);
@@ -460,18 +461,28 @@ static void ui_setup() {
     prefs.putUChar("vol", g_vol);
     set_volume(g_vol, true);
   }, LV_EVENT_RELEASED, nullptr);
+  lv_obj_t* kl = ui_label(dc, "Key lights", &lv_font_montserrat_20, C_INK);   // the keyboard's; off at the left end
+  lv_obj_set_pos(kl, 0, 92);
+  ui_kled = lv_slider_create(dc);
+  lv_slider_set_range(ui_kled, 0, 100);
+  lv_obj_set_size(ui_kled, 210, 16);
+  lv_obj_set_pos(ui_kled, 150, 96);
+  lv_obj_set_ext_click_area(ui_kled, 20);
+  lv_obj_add_event_cb(ui_kled, [](lv_event_t*) { kbd_set_light((uint8_t)lv_slider_get_value(ui_kled)); },
+                      LV_EVENT_VALUE_CHANGED, nullptr);
+  lv_obj_add_event_cb(ui_kled, [](lv_event_t*) { prefs.putUChar("kled", g_kled); }, LV_EVENT_RELEASED, nullptr);
   lv_obj_t* fl = ui_label(dc, "Flip screen 180°", &lv_font_montserrat_20, C_INK);
-  lv_obj_set_pos(fl, 0, 104);
+  lv_obj_set_pos(fl, 0, 136);
   ui_flip = lv_switch_create(dc);
   lv_obj_set_size(ui_flip, 84, 44);
-  lv_obj_align(ui_flip, LV_ALIGN_TOP_RIGHT, 0, 94);
+  lv_obj_align(ui_flip, LV_ALIGN_TOP_RIGHT, 0, 126);
   lv_obj_add_event_cb(ui_flip, [](lv_event_t*) {
     set_rotation(lv_obj_has_state(ui_flip, LV_STATE_CHECKED) ? 3 : 1);
   }, LV_EVENT_VALUE_CHANGED, nullptr);
 
   lv_obj_t* done = ui_button(scr, "Done", [](lv_event_t*) { panel_close(); }, true);
-  lv_obj_set_pos(done, 32, 604);
-  lv_obj_set_size(done, 410, 84);
+  lv_obj_set_pos(done, 32, 626);
+  lv_obj_set_size(done, 410, 62);
   lv_obj_set_style_text_font(lv_obj_get_child(done, 0), &lv_font_montserrat_28, 0);
 
   // networks

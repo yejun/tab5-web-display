@@ -6,13 +6,22 @@ Versions follow [semantic versioning](https://semver.org). The firmware prints i
 ## Unreleased
 
 - **Keyboard (firmware 1.3 with server 1.3):** M5Stack's Tab5 Keyboard, on Ext.Port1, types into the page:
-  letters, Aa (Shift) and Sym symbols, Enter, Backspace, Delete, Tab, Esc, arrows and Ctrl/Alt shortcuts. The
-  server repeats a held key (after 0.5 s, 30 per second), as the keyboard doesn't. With a video: Space pauses, the
-  arrows seek 5 s (and on while held, x6 with Aa), 0–9 jump to 0–90 %. In the settings panel it types the WiFi
-  name and password (Enter connects, Tab switches field, Esc closes). It can be plugged in while running.
+  letters, Enter, Backspace, Tab, Esc, arrows and Ctrl/Alt shortcuts. Aa gives capitals, and Shift on keys that
+  don't type (Aa+arrows selects text); it leaves symbol keys alone, so nothing types a character that isn't on the
+  key. Sym gives the second symbol printed on a key, and Home, End, Page Up, Page Down (Sym+arrows) and Delete
+  (Sym+Backspace). The server repeats a held key (after 0.5 s, 30 per second), as the keyboard doesn't. With a
+  video: Space pauses, the arrows seek 5 s (and on while held, x6 with Aa), 0–9 jump to 0–90 %. In the settings
+  panel it types the WiFi name and password (Enter connects, Tab switches field, Esc closes). It can be plugged in
+  while running (better with the Tab5 off: the header isn't made for it, and a dip can restart the Tab5).
+- **Keyboard lights:** the left one is white while Aa is held and amber while Sym is; the right one is green with
+  a PC connected, dim blue with WiFi but no PC, amber without WiFi, blinking red below 10 % battery. "Key lights"
+  in the settings sets their brightness (left end: off). Serial `kbr <reg>` / `kbw <reg> <value>` read and write
+  the keyboard's registers.
 - **Rotation follows the keyboard:** until the flip switch is first used, the Tab5 starts flipped when a keyboard
   is fitted (upright in the keyboard, as in M5Stack's examples) and normal without one. The switch shows the
   rotation in use; toggling it saves the choice, which then always wins. Serial `rot auto` forgets a saved choice.
+- **Reconnects after a Tab5 restart on a still page:** with nothing to send, the server kept the dead connection
+  for ever. TCP keepalive now notices within a few seconds.
 - **Decode time in the stats:** for pages the per-second line again shows how long a frame takes to decode (it is
   done in the background now, and read 0 ms).
 - **Multi-touch (firmware 1.3 with server 1.3):** every finger goes to the page, so pinch zoom and the browser's

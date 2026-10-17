@@ -92,7 +92,8 @@ HID_KEYS = {
     0x35: ("`", "~", "Backquote", 192), 0x36: (",", "<", "Comma", 188), 0x37: (".", ">", "Period", 190),
     0x38: ("/", "?", "Slash", 191), 0x4C: ("Delete", None, "Delete", 46), 0x4F: ("ArrowRight", None, "ArrowRight", 39),
     0x50: ("ArrowLeft", None, "ArrowLeft", 37), 0x51: ("ArrowDown", None, "ArrowDown", 40),
-    0x52: ("ArrowUp", None, "ArrowUp", 38),
+    0x52: ("ArrowUp", None, "ArrowUp", 38), 0x4A: ("Home", None, "Home", 36), 0x4B: ("PageUp", None, "PageUp", 33),
+    0x4D: ("End", None, "End", 35), 0x4E: ("PageDown", None, "PageDown", 34),
 }
 KEY_DELAY_S, KEY_RATE_S = 0.5, 1 / 30   # a held key repeats after this long, this often (the keyboard doesn't repeat)
 # Lanes (firmware 1.3): one TCP connection carries at most ~3 MB/s to the Tab5, because its 64 KB receive window is
@@ -332,6 +333,18 @@ def check_firmware(firmware):
     elif firmware[:2] > server:
         print(f"note: the Tab5's firmware is newer than this server ({__version__}). It works, but without the newer "
               "features; update the server from https://github.com/yejun/tab5-web-display")
+
+
+def keepalive(writer):
+    """Notice a Tab5 that restarted while nothing was being sent (a still page): with no traffic the old connection
+    looked open for ever, and the server never reconnected. TCP keepalive asks after 2 s of quiet, once a second;
+    a restarted Tab5 answers with a reset, a vanished one not at all (given up after 3 tries)."""
+    sock = writer.get_extra_info("socket")
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    idle = getattr(socket, "TCP_KEEPIDLE", getattr(socket, "TCP_KEEPALIVE", None))   # (the latter: macOS)
+    for opt, val in ((idle, 2), (getattr(socket, "TCP_KEEPINTVL", None), 1), (getattr(socket, "TCP_KEEPCNT", None), 3)):
+        if opt is not None:
+            sock.setsockopt(socket.IPPROTO_TCP, opt, val)
 
 
 class AudioOut:
@@ -607,6 +620,7 @@ class Mirror:
     async def session(self, host):
         self.host = host
         reader, writer = await asyncio.open_connection(host, PORT)
+        keepalive(writer)
         self.writer = writer
         self.connected(True)
         self.in_flight.clear()
