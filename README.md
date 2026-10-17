@@ -214,7 +214,10 @@ PC: server/server.py                                    Tab5: firmware/web_displ
 - **Drawing:** the ESP32-P4's hardware JPEG engine decodes a strip straight into the panel's portrait frame
   buffer. A rectangle is decoded to a buffer and then rotated into place by the PPA. Both use DMA, so the CPU only
   waits.
-- **Touch:** touches go back to the PC as touch events.
+- **Touch:** touches go back to the PC as touch events, every finger (up to 5), so pages pinch-zoom and scroll
+  as on a phone.
+- **Keyboard:** with M5Stack's Tab5 Keyboard fitted, keys go to the PC as key presses (see the changelog for the
+  video and settings keys).
 - **WiFi power save** turns off for 10 s after a touch, while updates stream in and while sound plays, so replies
   arrive quickly. Otherwise it stays on. `--power-save off` keeps it off.
 

@@ -5,6 +5,19 @@ Versions follow [semantic versioning](https://semver.org). The firmware prints i
 
 ## Unreleased
 
+- **Keyboard (firmware 1.3 with server 1.3):** M5Stack's Tab5 Keyboard, on Ext.Port1, types into the page:
+  letters, Aa (Shift) and Sym symbols, Enter, Backspace, Delete, Tab, Esc, arrows and Ctrl/Alt shortcuts. The
+  server repeats a held key (after 0.5 s, 30 per second), as the keyboard doesn't. With a video: Space pauses, the
+  arrows seek 5 s (and on while held, x6 with Aa), 0–9 jump to 0–90 %. In the settings panel it types the WiFi
+  name and password (Enter connects, Tab switches field, Esc closes). It can be plugged in while running.
+- **Rotation follows the keyboard:** until the flip switch is first used, the Tab5 starts flipped when a keyboard
+  is fitted (upright in the keyboard, as in M5Stack's examples) and normal without one. The switch shows the
+  rotation in use; toggling it saves the choice, which then always wins. Serial `rot auto` forgets a saved choice.
+- **Decode time in the stats:** for pages the per-second line again shows how long a frame takes to decode (it is
+  done in the background now, and read 0 ms).
+- **Multi-touch (firmware 1.3 with server 1.3):** every finger goes to the page, so pinch zoom and the browser's
+  own two-finger gestures work. Older servers and videos still get one finger. A second finger during an edge
+  touch means it's for the page, not the settings swipe.
 - **Videos:** `--file clip.mp4` plays any video ffmpeg can decode, in a loop and with sound (no PulseAudio needed).
   Tap to pause, drag sideways to seek (across the screen is 2 minutes; on the bar, the position follows the
   finger). A bar at the bottom shows the time, length and file name while paused or seeking and for 3 s after a

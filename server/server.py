@@ -78,7 +78,23 @@ SOFT_MIN = 48         # 4:2:0 only for pieces this big both ways: the Tab5's dec
 TOUCH_QUIET_S = 0.5   # ... but only one in flight this soon after a touch, where delay matters more than frame rate
 RECT = struct.Struct("<4sHHHHI")   # "TAB5" (or "TABS", a strip), x, y, w, h, jpeg length
 EVENT = struct.Struct("<BBHHH")    # type, flags, x, y, z
-EV_DOWN, EV_MOVE, EV_UP, EV_SHOWN, EV_HELLO, EV_LANES = 1, 2, 3, 5, 6, 7
+EV_DOWN, EV_MOVE, EV_UP, EV_SHOWN, EV_HELLO, EV_LANES, EV_KEY = 1, 2, 3, 5, 6, 7, 9
+# Keys (firmware 1.3, with M5Stack's Tab5 Keyboard): EV_KEY carries flags 1 = down / 0 = up, x = a USB HID usage
+# code, y = HID modifier bits. Each code's DOM key (unshifted, shifted), DOM code and Windows key code:
+HID_CTRL, HID_SHIFT, HID_ALT = 1, 2, 4
+HID_KEYS = {
+    **{0x04 + i: (c, c.upper(), "Key" + c.upper(), ord(c.upper())) for i, c in enumerate("abcdefghijklmnopqrstuvwxyz")},
+    **{0x1E + i: (c, s, "Digit" + c, ord(c)) for i, (c, s) in enumerate(zip("1234567890", "!@#$%^&*()"))},
+    0x28: ("Enter", None, "Enter", 13), 0x29: ("Escape", None, "Escape", 27), 0x2A: ("Backspace", None, "Backspace", 8),
+    0x2B: ("Tab", None, "Tab", 9), 0x2C: (" ", " ", "Space", 32), 0x2D: ("-", "_", "Minus", 189),
+    0x2E: ("=", "+", "Equal", 187), 0x2F: ("[", "{", "BracketLeft", 219), 0x30: ("]", "}", "BracketRight", 221),
+    0x31: ("\\", "|", "Backslash", 220), 0x33: (";", ":", "Semicolon", 186), 0x34: ("'", '"', "Quote", 222),
+    0x35: ("`", "~", "Backquote", 192), 0x36: (",", "<", "Comma", 188), 0x37: (".", ">", "Period", 190),
+    0x38: ("/", "?", "Slash", 191), 0x4C: ("Delete", None, "Delete", 46), 0x4F: ("ArrowRight", None, "ArrowRight", 39),
+    0x50: ("ArrowLeft", None, "ArrowLeft", 37), 0x51: ("ArrowDown", None, "ArrowDown", 40),
+    0x52: ("ArrowUp", None, "ArrowUp", 38),
+}
+KEY_DELAY_S, KEY_RATE_S = 0.5, 1 / 30   # a held key repeats after this long, this often (the keyboard doesn't repeat)
 # Lanes (firmware 1.3): one TCP connection carries at most ~3 MB/s to the Tab5, because its 64 KB receive window is
 # fixed; spread over two connections in chunks, ~4.4 MB/s on WiFi 6. See firmware/web_display/lanes.h (also for why
 # not more than two).
@@ -411,7 +427,9 @@ class SystemAudio(AudioOut):
 
 
 class Mirror:
-    """One Chromium page mirrored to the Tab5: frames out, touches in."""
+    """One Chromium page mirrored to the Tab5: frames out, touches and keys in."""
+
+    multitouch = True   # ask the Tab5 for every finger (firmware 1.3): the browser pinch-zooms and scrolls with them
 
     def __init__(self, page, cdp, args, audio):
         self.page, self.cdp, self.args, self.audio = page, cdp, args, audio
@@ -420,6 +438,7 @@ class Mirror:
         self.touch_at = None          # when the last touch event arrived, for the touch -> shown latency
         self.latest = None            # newest screencast frame (base64 PNG) not yet decoded
         self.decoding = None          # the task decoding screencast frames
+        self.decode_times = []        # how long each decode took, for the stats
         self.frame = None             # newest decoded frame: what the page looks like now
         self.in_flight = collections.deque()   # (sent at, touch time or None) of updates not yet shown
         self.acked = asyncio.Event()
@@ -428,7 +447,9 @@ class Mirror:
         self.firmware = None                   # (major, minor, patch) from the hello; None: older than 1.1
         self.stats_task = None
         self.live, self.host = False, None   # live: the Tab5 is showing our updates
-        self.touches, self.touch_wake = collections.deque(), asyncio.Event()   # touches waiting for the page
+        self.inputs, self.input_wake = collections.deque(), asyncio.Event()   # touches and keys waiting for the page
+        self.fingers = {}              # finger -> (x, y): what is on the screen now, as far as the page will know
+        self.repeater = None           # repeats the key held down
         self.lane_offer, self.lane_answer, self.lane_answered = None, None, asyncio.Event()
         self.lanes, self.lane_readers, self.seq = [], [], 0   # lane writers, and the next chunk's number
         self.lanes_broken = False      # a lane setup failed: don't try again in this run
@@ -456,7 +477,9 @@ class Mirror:
     async def decode_latest(self):
         while self.latest is not None:
             data, self.latest = self.latest, None
+            t0 = time.monotonic()
             self.frame = await asyncio.to_thread(self.decode_png, data)
+            self.decode_times.append(time.monotonic() - t0)
             self.dirty.set()
 
     async def capture(self):
@@ -469,9 +492,11 @@ class Mirror:
             await asyncio.sleep(0.05)
         raise TimeoutError("no frame from Chromium")
 
-    async def touch(self, kind, x, y):
+    async def touch(self, kind, x, y, fingers):
+        """fingers: every finger down after this event. Chromium compares them with the previous event's, so a finger
+        that lifts while others stay is a touchEnd that lists the others."""
         types = {EV_DOWN: "touchStart", EV_MOVE: "touchMove", EV_UP: "touchEnd"}
-        points = [] if kind == EV_UP else [{"x": x, "y": y}]
+        points = [{"x": fx, "y": fy, "id": f} for f, (fx, fy) in fingers.items()]
         try:
             await asyncio.wait_for(self.cdp.send("Input.dispatchTouchEvent", {"type": types[kind], "touchPoints": points}), 2)
         except TIMEOUTS:
@@ -479,22 +504,69 @@ class Mirror:
         self.touch_at = time.monotonic()
         self.dirty.set()
 
-    def queue_touch(self, kind, x, y):
+    async def key(self, down, code, mod, repeat=False):
+        if code not in HID_KEYS:
+            return
+        name, shifted, dom_code, vk = HID_KEYS[code]
+        key = shifted if mod & HID_SHIFT and shifted else name
+        p = {"type": "keyUp", "key": key, "code": dom_code, "windowsVirtualKeyCode": vk,
+             "modifiers": (mod & HID_CTRL and 2) | (mod & HID_SHIFT and 8) | (mod & HID_ALT and 1)}
+        if down:
+            text = "\r" if code == 0x28 else key if len(key) == 1 else ""
+            if text and not mod & (HID_CTRL | HID_ALT):   # a key that types
+                p.update(type="keyDown", text=text, unmodifiedText=text)
+            else:   # a key that does something (Backspace, arrows, Ctrl+A, ...)
+                p["type"] = "rawKeyDown"
+            p["autoRepeat"] = repeat
+        try:
+            await asyncio.wait_for(self.cdp.send("Input.dispatchKeyEvent", p), 2)
+        except TIMEOUTS:
+            print("key event timed out (page busy or navigating)")
+        if not repeat:
+            self.touch_at = time.monotonic()
+        self.dirty.set()
+
+    def queue_key(self, down, code, mod):
+        """Keys go in the same queue as touches, so the two reach the page in order. The keyboard reports only
+        down and up; a held key repeats here, but a repeat is not queued behind one still waiting."""
+        if self.repeater:
+            self.repeater.cancel()
+            self.repeater = None
+        self.inputs.append((EV_KEY, down, code, mod))
+        self.input_wake.set()
+        if down and code in HID_KEYS and code != 0x29:
+            self.repeater = asyncio.create_task(self.repeat_key(code, mod))
+
+    async def repeat_key(self, code, mod):
+        await asyncio.sleep(KEY_DELAY_S)
+        while True:
+            if not (self.inputs and self.inputs[-1][-1] is True):
+                self.inputs.append((EV_KEY, True, code, mod, True))
+                self.input_wake.set()
+            await asyncio.sleep(KEY_RATE_S)
+
+    def queue_touch(self, kind, finger, x, y):
         """Touches reach the page in order but never hold up reading the Tab5's acks: dispatching one waits for
         the page, and a busy page took longer per move than the Tab5 sends them (60/s), so acks queued behind a
         growing backlog. While the page is busy, waiting moves collapse into the newest."""
-        if kind == EV_MOVE and self.touches and self.touches[-1][0] == EV_MOVE:
-            self.touches[-1] = (kind, x, y)
+        if kind == EV_UP:
+            self.fingers.pop(finger, None)
         else:
-            self.touches.append((kind, x, y))
-        self.touch_wake.set()
+            self.fingers[finger] = (x, y)
+        entry = (kind, x, y, dict(self.fingers))
+        if kind == EV_MOVE and self.inputs and self.inputs[-1][0] == EV_MOVE:
+            self.inputs[-1] = entry   # it holds every finger, so the one it replaces is not missed
+        else:
+            self.inputs.append(entry)
+        self.input_wake.set()
 
-    async def dispatch_touches(self):
+    async def dispatch_inputs(self):
         while True:
-            await self.touch_wake.wait()
-            self.touch_wake.clear()
-            while self.touches:
-                await self.touch(*self.touches.popleft())
+            await self.input_wake.wait()
+            self.input_wake.clear()
+            while self.inputs:
+                kind, *rest = self.inputs.popleft()
+                await (self.key(*rest) if kind == EV_KEY else self.touch(kind, *rest))
 
     async def read_events(self, reader):
         while True:
@@ -514,7 +586,11 @@ class Mirror:
                         print(f"touch->shown {1000 * (now - touch_t):4.0f} ms")
                 self.acked.set()
             elif kind in (EV_DOWN, EV_MOVE, EV_UP):
-                self.queue_touch(kind, x, y)
+                self.queue_touch(kind, flags, x, y)
+            elif kind == EV_KEY:
+                if self.args.verbose:
+                    print(f"key {'down' if flags & 1 else 'up'} {HID_KEYS.get(x, ('0x%02x' % x,))[0]!r} modifiers {y}")
+                self.queue_key(bool(flags & 1), x, y)
             elif kind == EV_LANES:
                 if flags == LANE_OFFER:
                     self.lane_offer = (x, y, _z)   # port, token, most lanes
@@ -522,7 +598,7 @@ class Mirror:
                     self.lane_answer = flags
                     self.lane_answered.set()
             elif kind == EV_HELLO:   # firmware 1.1 or later: it takes settings and can play sound
-                self.writer.write(RECT.pack(b"TCFG", POWER_SAVE[self.args.power_save], 0, 0, 0, 0))
+                self.writer.write(RECT.pack(b"TCFG", POWER_SAVE[self.args.power_save], int(self.multitouch), 0, 0, 0))
                 if self.audio and flags & HELLO_SOUND:
                     self.audio.target = (self.host, PORT)
                 self.strips, self.flipped = bool(flags & HELLO_STRIPS), bool(flags & HELLO_FLIPPED)
@@ -534,12 +610,13 @@ class Mirror:
         self.writer = writer
         self.connected(True)
         self.in_flight.clear()
-        self.touches.clear()
+        self.inputs.clear()
+        self.fingers.clear()
         self.strips = self.flipped = False
         self.firmware = None
         self.lane_offer, self.lanes, self.seq = None, [], 0
         events = asyncio.create_task(self.read_events(reader))
-        toucher = asyncio.create_task(self.dispatch_touches())
+        toucher = asyncio.create_task(self.dispatch_inputs())
         prev, last_start, last_sent, needs_settle = None, 0.0, 0.0, False
         rough = np.zeros((H // TILE, W // TILE), bool)  # tiles last sent below the top quality
         rough_at = np.zeros((H // TILE, W // TILE))        # when each was last sent below the top quality
@@ -657,6 +734,9 @@ class Mirror:
         finally:
             events.cancel()
             toucher.cancel()
+            if self.repeater:
+                self.repeater.cancel()
+                self.repeater = None
             writer.close()
             for w in self.lanes:
                 w.close()
@@ -761,6 +841,9 @@ class Mirror:
         s = {"fps": n / secs, "kbps": sum(b for b, *_ in stats) / 1024 / secs,
              "area": 100 * sum(a for _, a, *_ in stats) / max(n, 1) / (W * H),
              "capture": 1000 * sum(c for *_, c, _ in stats) / max(n, 1), "encode": 1000 * sum(e for *_, e in stats) / max(n, 1)}
+        if self.decode_times:   # pages: frames are decoded in the background, so time the decoding itself
+            s["capture"] = 1000 * sum(self.decode_times) / len(self.decode_times)
+            self.decode_times = []
         show = 1000 * sum(self.show_times) / max(len(self.show_times), 1)
         self.show_times = []
         if n > 2:
@@ -789,6 +872,7 @@ DRAG_PX = 24            # a touch that moves this far sideways seeks, otherwise 
 SEEK_SPAN_S = 120       # dragging across the whole screen seeks this far (through the whole video if shorter);
                         # dragging on the bar itself puts the position under the finger
 PREVIEW_S = 0.15        # while seeking, the frame at the drag position is shown at most this often
+KEY_SEEK_S = (5, 1)     # the arrow keys seek this far (s), then this far each repeat while held; x6 with Aa (Shift)
 ACCENT = (90, 226, 199)  # as in the Tab5's settings
 PAGE_SUFFIXES = {".html", ".htm", ".xhtml", ".svg"}
 
@@ -969,7 +1053,10 @@ class Video:
 
 class VideoMirror(Mirror):
     """A video file mirrored to the Tab5: tap to pause and resume, drag sideways to seek. A bar at the bottom shows
-    the position while paused or seeking and for a few seconds after a touch."""
+    the position while paused or seeking and for a few seconds after a touch. With the keyboard: Space pauses and
+    resumes, the left and right arrows seek, and 0-9 jump to 0-90 % of the way through."""
+
+    multitouch = False   # one finger: tap and drag
 
     def __init__(self, args, audio, path, info):
         super().__init__(None, None, args, audio)
@@ -1083,7 +1170,7 @@ class VideoMirror(Mirror):
                     self.dirty.set()
             await asyncio.sleep(PREVIEW_S)
 
-    async def touch(self, kind, x, y):
+    async def touch(self, kind, x, y, fingers=None):
         now, v = time.monotonic(), self.video
         if kind == EV_DOWN:
             self.down = (x, y, now, v.position())
@@ -1114,13 +1201,44 @@ class VideoMirror(Mirror):
         self.dirty.set()
 
 
+    async def key(self, down, code, mod, repeat=False):
+        now, v = time.monotonic(), self.video
+        arrow = {0x50: -1, 0x4F: 1}.get(code)
+        if arrow and v.duration:
+            if down:
+                if not self.seeking:   # as a drag: the bar shows how far, and the picture follows
+                    self.seeking, self.on_bar = True, False
+                    self.down = (0, 0, now, v.position())
+                    self.target = self.down[3]
+                    v.halt("seek", True)
+                    self.previewer = asyncio.create_task(self.preview())
+                step = KEY_SEEK_S[repeat] * (6 if mod & HID_SHIFT else 1)
+                self.target = min(max(self.target + arrow * step, 0.0), max(v.duration - 0.5, 0.0))
+            elif self.seeking:
+                self.seeking, self.down = False, None
+                v.halts.discard("seek")
+                v.start(self.target)
+        elif not down or repeat or self.seeking:
+            return
+        elif code == 0x2C:   # Space
+            v.halt("pause", not v.paused)
+        elif 0x1E <= code <= 0x27 and v.duration:   # 1-9, 0
+            v.start((code - 0x1D) % 10 / 10 * v.duration)
+        else:
+            return
+        self.bar_until = now + BAR_SHOW_S
+        self.touch_at = now
+        self.dirty.set()
+
+
 async def run_video(args, path, info, host):
     audio = None if args.no_audio else AudioOut()
     mirror = VideoMirror(args, audio, path, info)
     duration, fps, has_sound = info
     print(f"Tab5 Web Display {__version__}: playing {path.name} ("
           f"{clock_text(duration) if duration else 'unknown length'}, {min(fps, VIDEO_FPS):.3g} fps, "
-          f"{'with' if has_sound and audio else 'no'} sound); tap the Tab5 to pause, drag sideways to seek")
+          f"{'with' if has_sound and audio else 'no'} sound); tap the Tab5 to pause, drag sideways to seek"
+          " (keyboard: Space, arrows, 0-9)")
     mirror.video.start(0.0)
     try:
         await serve(mirror, host)
