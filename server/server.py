@@ -43,7 +43,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from playwright.async_api import async_playwright
 
-__version__ = "1.3.1"
+__version__ = "1.3.2"
 
 W, H, TILE, PORT = 1280, 720, 16, 8765
 # Chromium's rasterisation jitters a few pixels by a few levels between frames. A tile counts as changed if some
@@ -449,12 +449,16 @@ class Mirror:
 
     multitouch = True   # ask the Tab5 for every finger (firmware 1.3): the browser pinch-zooms and scrolls with them
     gestures = True     # ... and for its swipes: tabs, back and forward
+    paced = False       # frames carry due times, for the Tab5's playout buffer (video files)
+    all_motion = False  # every change is motion (a video file): never sent as still content during playback
 
     def __init__(self, page, cdp, args, audio):
         self.page, self.cdp, self.args, self.audio = page, cdp, args, audio
         self.tabs = [page] if page else []   # the browser's tabs, oldest first; self.page is the one shown
         self.home = None                     # the start page, opened again should the last tab close itself
         self.toast, self.toast_until = None, 0.0
+        self.timed = False            # this session sends due times (paced, firmware 1.3.2 on lanes)
+        self.cap_due = None           # due time of the frame capture() returned, or None
         self.toast_font = ImageFont.load_default(size=26)
         self.writer = None
         self.dirty = asyncio.Event()
@@ -463,9 +467,10 @@ class Mirror:
         self.decoding = None          # the task decoding screencast frames
         self.decode_times = []        # how long each decode took, for the stats
         self.frame = None             # newest decoded frame: what the page looks like now
-        self.in_flight = collections.deque()   # (sent at, touch time or None) of updates not yet shown
+        self.in_flight = collections.deque()   # (sent at, touch time, show time or None, size) of updates not yet shown
         self.acked = asyncio.Event()
         self.show_times = []                   # send -> shown round trips, for the stats
+        self.shown_at = []                     # when each update was shown, for the frame pacing (-v)
         self.strips = self.flipped = False     # from the Tab5's hello
         self.firmware = None                   # (major, minor, patch) from the hello; None: older than 1.1
         self.stats_task = None
@@ -480,6 +485,8 @@ class Mirror:
         self.rate = ADAPT_RATE0        # estimated link rate, bytes/s
         self.frames_in, self.fps_in = 0, 30.0   # new frames from the source this second, and per second
         self.ack_wait = 0.0            # seconds spent waiting for "shown" this second (the link, or the Tab5, is full)
+        self.timed_shown = self.timed_late = 0   # timed frames shown this second, and how many of them late
+        self.timed_bytes = 0                     # ... and their size: what got through
 
     @staticmethod
     def decode_png(data):
@@ -541,6 +548,9 @@ class Mirror:
         await page.bring_to_front()   # a tab in the background is hidden: it doesn't paint, and its timers slow down
         await cdp.send("Page.startScreencast", {"format": "png", "maxWidth": W, "maxHeight": H})
         self.dirty.set()
+
+    def set_lead(self, lead):
+        pass   # pages can't be sent ahead
 
     def watch_tabs(self, ctx):
         """New tabs (a link with target=_blank, window.open) are shown at once, as in a browser."""
@@ -720,9 +730,14 @@ class Mirror:
                     print(f"showing on Tab5 {self.host}:{PORT} (firmware {fw}, {sound})")
                     check_firmware(self.firmware)
                 if self.in_flight:
-                    sent_at, touch_t = self.in_flight.popleft()
+                    sent_at, touch_t, show, size = self.in_flight.popleft()
+                    if show is not None:
+                        self.timed_shown += 1
+                        self.timed_bytes += size
+                        self.timed_late += x > 1 + PACED_LATE_MS
                     now = time.monotonic()
                     self.show_times.append(now - sent_at)
+                    self.shown_at.append(now)
                     if touch_t is not None:
                         print(f"touch->shown {1000 * (now - touch_t):4.0f} ms")
                 self.acked.set()
@@ -773,6 +788,11 @@ class Mirror:
             while not events.done():
                 if self.lane_offer and not self.lanes and self.args.lanes > 1 and not self.lanes_broken:
                     await self.open_lanes(host)
+                # (one connection can't hold frames ahead: its 64 KB window would stall the stream)
+                timed = self.paced and not self.args.no_pacing and bool(self.lanes) and (self.firmware or (0,)) >= (1, 3, 2)
+                if timed != self.timed:
+                    self.timed = timed
+                    self.set_lead(VIDEO_LEAD_S if timed else 0.0)
                 settle = False
                 try:   # repaints wake us; the timeouts are the cleanup pass and a safety net
                     await asyncio.wait_for(self.dirty.wait(), SETTLE_S if needs_settle else 1.0)
@@ -786,6 +806,7 @@ class Mirror:
                 touch_t = self.touch_at if self.touch_at is not None and self.touch_at < t0 else None
                 moving = not settle and t0 - last_sent < MOTION_S
                 cur = await self.capture()
+                due = self.cap_due if self.timed else None
                 t1 = time.monotonic()
                 top = self.args.quality
 
@@ -796,13 +817,18 @@ class Mirror:
                 def diff_and_encode():   # in a worker thread, so touches, acks and sound keep flowing meanwhile
                     work[0] = time.monotonic()
                     tiles = changed_tiles(prev, cur, exact=settle)
-                    changed[0] = tiles.mean()
                     changed_at[tiles] = t0
-                    motion_q = self.motion_quality(tiles.mean())
+                    # Moving: changed in the last MOTION_S, not only now. Smooth or dark footage changes many tiles
+                    # by less than the noise threshold in any one frame; judged by one frame, a video strip counted as
+                    # mostly still and went out at MOTION_Q_MID in full colour, three times the size (and stuttered).
+                    # A video file is all motion.
+                    active = np.ones_like(tiles) if self.all_motion else t0 - changed_at < MOTION_S
+                    changed[0] = active.mean()
+                    motion_q = self.motion_quality(changed[0])
                     pieces = []   # (piece, quality, subsampling)
                     for piece in plan(tiles | rough if settle else tiles, self.strips):
                         _, x, y, w, h = piece
-                        share = tiles[y // TILE:(y + h) // TILE, x // TILE:(x + w) // TILE].mean()
+                        share = active[y // TILE:(y + h) // TILE, x // TILE:(x + w) // TILE].mean()
                         if not moving:
                             pieces.append((piece, top, 0))
                         elif share >= ROUGH_SHARE:
@@ -831,7 +857,7 @@ class Mirror:
                     out += RECT.pack(b"TAB5", 0, 0, 0, 0, 0)
                     # at most one update in flight, or two during an animation (not right after a touch)
                     quiet = self.touch_at is None or t0 - self.touch_at > TOUCH_QUIET_S
-                    limit = 2 if moving and quiet else 1
+                    limit = PACED_IN_FLIGHT if due is not None else 2 if moving and quiet else 1
                     t_wait = time.monotonic()
                     while len(self.in_flight) >= limit:
                         self.acked.clear()
@@ -848,9 +874,14 @@ class Mirror:
                             break
                     if touch_t is not None:
                         self.touch_at = None
-                    self.in_flight.append((time.monotonic(), touch_t))
+                    self.in_flight.append((time.monotonic(), touch_t, due + VIDEO_AV_S if due is not None else None,
+                                           len(out)))
                     t_send = time.monotonic()
                     self.ack_wait += t_send - t_wait
+                    if due is not None:   # when to show it (PC clock, ms), and how early it goes out
+                        show = due + VIDEO_AV_S
+                        p, lead = int(show * 1000) & 0xFFFFFFFF, max(-32768, min(32767, int((show - t_send) * 1000)))
+                        out = RECT.pack(b"TPTS", p & 0xFFFF, p >> 16, lead & 0xFFFF, 0, 0) + out
                     await self.send(out)
                     t_sent = time.monotonic()
                     last_sent = t0
@@ -973,6 +1004,19 @@ class Mirror:
         if not self.adapting() or big < 3 or big < 0.8 * len(stats):
             return
         fps, rate = len(stats) / secs, sum(b for b, *_ in stats) / secs
+        shown, late, got = self.timed_shown, self.timed_late, self.timed_bytes
+        self.timed_shown = self.timed_late = self.timed_bytes = 0
+        if self.timed and shown:
+            # Frames go out ahead of time, so the server never waits: whether they arrive in time tells instead, and
+            # what the Tab5 showed is what got through (what was sent beyond that queues up on the way).
+            if late > 0.05 * shown:
+                self.rate = 0.6 * self.rate + 0.4 * got / secs
+            elif late <= 0.01 * shown:
+                self.rate = min(self.rate * 1.02, ADAPT_RATE_MAX)
+            if self.args.verbose:
+                print(f"large motion: quality {self.vq:.0f}, link estimate {self.rate / 1e6:.2f} MB/s, "
+                      f"content {self.fps_in:.0f} fps, {late} of {shown} frames late")
+            return
         if fps < 0.9 * self.fps_in and waited > 0.25:
             self.rate = 0.6 * self.rate + 0.4 * rate
         else:
@@ -993,9 +1037,16 @@ class Mirror:
             self.decode_times = []
         show = 1000 * sum(self.show_times) / max(len(self.show_times), 1)
         self.show_times = []
+        pacing = ""
+        if len(self.shown_at) > 3 and self.args.verbose:   # how evenly frames reached the screen
+            gaps = 1000 * np.diff(self.shown_at)
+            stutters = int((gaps > 1500 / self.fps_in).sum())   # longer than 1.5 of the content's frame periods
+            pacing = (f" | gaps p50 {np.percentile(gaps, 50):3.0f} p95 {np.percentile(gaps, 95):3.0f} "
+                      f"max {gaps.max():3.0f} ms, {stutters} stutter(s)")
+        self.shown_at = self.shown_at[-1:]
         if n > 2:
             print(f"{s['fps']:4.1f} fps {s['kbps']:6.0f} KB/s | avg area {s['area']:4.1f}% decode {s['capture']:3.0f} ms "
-                  f"diff+encode {s['encode']:3.0f} ms send->shown {show:3.0f} ms")
+                  f"diff+encode {s['encode']:3.0f} ms send->shown {show:3.0f} ms{pacing}")
         # in the background and with a timeout: the frame loop must never wait for the page
         if self.stats_task is None or self.stats_task.done():
             self.stats_task = asyncio.create_task(self.push_stats(s))
@@ -1019,6 +1070,12 @@ DRAG_PX = 24            # a touch that moves this far sideways seeks, otherwise 
 SEEK_SPAN_S = 120       # dragging across the whole screen seeks this far (through the whole video if shorter);
                         # dragging on the bar itself puts the position under the finger
 PREVIEW_S = 0.15        # while seeking, the frame at the drag position is shown at most this often
+# Playout buffer (firmware 1.3.2, on lanes): video frames go out VIDEO_LEAD_S before they are due, each with its due
+# time ("TPTS"), and the Tab5 shows them then, evenly, instead of as WiFi delivers them (in bunches: a 30 fps video
+# skipped a frame on the screen every fifth or so). They show VIDEO_AV_S after the clock, as the sound does.
+VIDEO_LEAD_S, VIDEO_AV_S = 0.10, 0.06
+PACED_IN_FLIGHT = 8     # updates in flight while timed: the lead holds several frames
+PACED_LATE_MS = 5       # a timed frame drawn this much after its time was late (the Tab5 says, in its "shown")
 KEY_SEEK_S = (5, 1)     # the arrow keys seek this far (s), then this far each repeat while held; x6 with Aa (Shift)
 ACCENT = (90, 226, 199)  # as in the Tab5's settings
 PAGE_SUFFIXES = {".html", ".htm", ".xhtml", ".svg"}
@@ -1086,6 +1143,7 @@ class Video:
         self.halts = {"offline"}      # the clock stands still while any: "pause", "seek", "offline" (no Tab5)
         self.clock = (0.0, time.monotonic(), False)   # (position, at monotonic time, running): one atomic value
         self.skipped = 0              # frames dropped because decoding fell behind
+        self.lead = 0.0               # hand frames out this long early (with their due time), for the playout buffer
 
     @property
     def paused(self):
@@ -1125,10 +1183,11 @@ class Video:
             p.kill()
         self.procs = []
 
-    def wait_for(self, gen, pts):
-        """Sleep until the clock reaches pts; False if this decoder was replaced meanwhile."""
+    def wait_for(self, gen, pts, lead=0.0):
+        """Sleep until the clock reaches pts - lead (only while it runs: never past a pause); False if this decoder was
+        replaced meanwhile."""
         while gen == self.gen:
-            ahead = pts - self.position()
+            ahead = pts - self.position() - (lead if self.clock[2] else 0.0)
             if ahead <= 0:
                 return True
             time.sleep(min(ahead, 0.02))   # while the clock stands still this just keeps checking
@@ -1145,12 +1204,14 @@ class Video:
                     return
                 pts = start + i / self.fps
                 # the first frame shows at once, so a seek while paused shows where it landed
-                if i and not self.wait_for(gen, pts):
+                if i and not self.wait_for(gen, pts, self.lead):
                     return
                 if i and self.position() - pts > 1 / self.fps:
                     self.skipped += 1
                     continue
-                self.loop.call_soon_threadsafe(self.on_frame, gen, np.frombuffer(frame, np.uint8).reshape(H, W, 3))
+                # when the clock reaches it (monotonic time); None: show at once
+                due = time.monotonic() + pts - self.position() if i and self.clock[2] else None
+                self.loop.call_soon_threadsafe(self.on_frame, gen, np.frombuffer(frame, np.uint8).reshape(H, W, 3), due)
         finally:
             proc.stdout.close()
             proc.wait()
@@ -1204,12 +1265,14 @@ class VideoMirror(Mirror):
     resumes, the left and right arrows seek, and 0-9 jump to 0-90 % of the way through."""
 
     multitouch = gestures = False   # one finger: tap and drag (every edge swipe opens the settings)
+    paced = all_motion = True
 
     def __init__(self, args, audio, path, info):
         super().__init__(None, None, args, audio)
         self.name = path.name
         self.video = Video(path, *info, audio, self.new_frame)
         self.still = None            # the preview frame while seeking
+        self.frame_due = None        # when self.frame is due (monotonic), if handed out ahead
         self.down = None             # (x, y, time, position) where the current touch started
         self.seeking, self.on_bar, self.target = False, False, 0.0
         self.bar_until = time.monotonic() + BAR_SHOW_S
@@ -1217,9 +1280,9 @@ class VideoMirror(Mirror):
         self.font = ImageFont.load_default(size=26)
         self.small = ImageFont.load_default(size=21)
 
-    def new_frame(self, gen, frame):
+    def new_frame(self, gen, frame, due=None):
         if gen == self.video.gen:
-            self.frame, self.still = frame, None
+            self.frame, self.still, self.frame_due = frame, None, due
             self.frames_in += 1
             self.dirty.set()
 
@@ -1238,10 +1301,15 @@ class VideoMirror(Mirror):
             print(f"video: {self.video.skipped} frame(s) skipped, decoding fell behind")
         self.video.skipped = 0
 
+    def set_lead(self, lead):
+        self.video.lead = lead
+
     async def capture(self):
         while self.frame is None:
             await asyncio.sleep(0.02)
         base = self.still if self.still is not None else self.frame
+        self.cap_due = self.frame_due if self.still is None and not self.seeking else None
+        self.frame_due = None   # a frame captured again (the bar redrawn) is shown at once, after the timed ones
         alpha = self.bar_alpha()
         return await asyncio.to_thread(self.compose, base, alpha) if alpha > 0 else base
 
@@ -1458,6 +1526,8 @@ async def main():
                     help="TCP connections to spread the stream over, with firmware 1.3 or later (default 2; 1 = one "
                          "connection, as before)")
     ap.add_argument("--browser", default=find_browser(), help="Chromium, Chrome or Edge executable (default: found on the PATH or in the usual install folders)")
+    ap.add_argument("--no-pacing", action="store_true",
+                    help="videos: show frames as they arrive, without the Tab5's playout buffer (firmware 1.3.2)")
     ap.add_argument("--show", action="store_true", help="show the browser window too (for debugging)")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()

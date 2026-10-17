@@ -5,7 +5,7 @@ server renders a page in headless Chromium on your PC, sends what changed to the
 touches (and keys, with M5Stack's Tab5 Keyboard) back to the page. Several ready-made apps are included, and you can
 show any URL, local HTML file or video.
 
-Version 1.3.1 (firmware 1.3.0) · MIT licence
+Version 1.3.2 (firmware 1.3.2) · MIT licence
 
 ![Home launcher on the Tab5](docs/home.png)
 
@@ -130,8 +130,10 @@ screen and plays in a loop.
   0–90 % of the way through.
 - **The bar** at the bottom shows the time, the length and the file name. It stays while paused or seeking, and
   fades out 3 seconds after a touch while playing.
-- **Picture quality** adapts to what WiFi carries: detailed footage plays at about 28 fps, simple footage at the
-  full 30. A paused picture sharpens to full quality.
+- **Smooth playback** (firmware 1.3.2): the Tab5 keeps a few frames in hand and shows them at an even pace, so
+  WiFi's uneven delivery doesn't make the picture stutter. For a second after a touch it shows frames at once.
+- **Picture quality** adapts to what WiFi carries, so that every frame arrives in time: detailed footage plays at
+  the full 30 fps at about quality 45–50. A paused picture sharpens to full quality.
 
 ### App settings
 
@@ -158,6 +160,7 @@ screen and plays in a loop.
 | `--max-fps N` | cap on updates per second, default 60 |
 | `--encoder E` | JPEG encoder: `auto` (default, the fastest installed), `pillow`, `numba` or `turbo+numba` |
 | `--lanes N` | TCP connections to spread the stream over (firmware 1.3 or later): `2` (default) or `1`, a single connection |
+| `--no-pacing` | videos: show frames as they arrive, without the Tab5's playout buffer |
 | `--show` | also open a visible browser window |
 | `-v` | log every update |
 | `--version` | print the version |
@@ -277,6 +280,15 @@ adapts to fit the measured link rate divided by the frame rate, between 35 and 8
 141 KB per frame at quality 70 and 89 KB at 40, which still looks fine at the panel's 290 ppi). Sound is
 a few tens of milliseconds behind the picture at most.
 
+**Playout buffer (firmware 1.3.2):** frames left the PC evenly but WiFi delivered them in bunches (5 ms apart, then
+60), and drawn on arrival a 30 fps video showed a gap of over 50 ms every eighth frame or so. Now the server hands
+video frames out 100 ms early, each with its due time, and the Tab5 holds each one until then (it stays compressed
+in the lane buffers) and shows it 60 ms after the clock, as the sound. The Tab5 ties its clock to the PC's by the
+fastest deliveries it sees, and tells the server in each "shown" how late a frame began; the quality adapts to
+keep that rare. For a second after a touch or a key it draws frames at once. Measured on detailed footage: 29.8 fps
+instead of 27.9, gaps over 50 ms 3 % instead of 13 %, the 95th percentile gap 45 ms instead of 85, at the same
+quality. It needs the lanes (one connection's 64 KB window can't hold frames ahead); `--no-pacing` turns it off.
+
 **Encoders:** a frame's changed pieces are converted to TV-range YCbCr and encoded as JPEG in a worker thread.
 
 | encoder | needs | video strip / text page (encode) | server CPU, video / motion test |
@@ -320,7 +332,7 @@ them in order. Measured on WiFi 6: one connection 3.1 MB/s, two 4.4, three 4.8, 
 | follow finger, while dragging | <1% | ~55 | ~110 KB/s |
 | bouncing balls | 20–35% | 51–54 | ~1.2 MB/s |
 | full-screen animation | 75–90% | 28–34 | ~1.9 MB/s |
-| video, detailed (Big Buck Bunny 720p) | 100% | 26–29 (quality ~45) | ~2.7 MB/s |
+| video, detailed (Big Buck Bunny 720p) | 100% | ~30, evenly (quality ~45–50) | ~2.7 MB/s |
 | video, simple | ~8% | 30 (quality 85) | ~100 KB/s |
 
 **Details worth knowing:**
@@ -351,7 +363,7 @@ USB serial at 115200 baud:
 | `rot auto` | forget the saved rotation: from the next start it follows the keyboard |
 | `beep` | play a test tone and print the speaker's state |
 | `forget` | erase all saved settings and restart |
-| `S` | statistics since the last `S`, including sound, battery, keyboard, lanes and memory |
+| `S` | statistics since the last `S`, including frame pacing, sound, battery, keyboard, lanes and memory |
 | `wifiinfo` | the WiFi standard in use (WiFi 4 or 6), channel and signal |
 | `T <x> <y>`, `drag <x0> <y0> <x1> <y1> [ms]` | scripted touches, for testing without a finger |
 | `pinch <cx> <cy> <d0> <d1> [ms]`, `three <x0> <x1> <y> [ms]` | scripted two-finger pinch, three-finger swipe |

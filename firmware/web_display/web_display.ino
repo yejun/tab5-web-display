@@ -7,12 +7,15 @@
 //             are multiples of 16. The end marker is a header with w = h = len = 0.
 //             A header with magic "TCFG" instead is settings: x = WiFi power save (0 auto, 1 always off),
 //             y bits: 1 = send every finger (multi-touch), not only the first; 2 = send gestures (below).
+//             Magic "TPTS" (firmware 1.3.2, only on lanes) times the update that follows: x | y << 16 = when it is due on
+//             the PC's clock (ms, wrapping), w = how many ms before that the PC sent it (signed). See pacing below.
 //             Magic "TABS" is a strip: landscape columns x..x+w at full height (y = 0, h = 720), sent as a
 //             720-wide, w-tall JPEG already rotated into the panel's portrait orientation, and decoded straight
 //             into the frame buffer (see handle_strip).
 // Tab5 -> PC: 8-byte records { u8 type, u8 flags, u16 x, u16 y, u16 z }: 1 = touch down, 2 = move, 3 = up
 //             (with multi-touch on, flags = the finger, 0-4; otherwise only the first finger, flags 0),
-//             5 = update shown (sent after each end marker, so the PC never has more than one update in flight),
+//             5 = update shown (sent after each end marker, so the PC never has more than one update in flight;
+//             firmware 1.3.2: x = 1 + how many ms late a timed update began, 0 for an untimed one),
 //             6 = hello, sent on connect: x.y.z = firmware version; flags: 1 = can play sound, 2 = takes strips,
 //             4 = screen flipped 180°. The PC sends "TCFG" and "TABS" only after a hello, so older firmware never
 //             sees them. 7 = lanes (offer and answer): the stream can continue over several connections, see lanes.h.
@@ -47,7 +50,7 @@
 #include <esp_timer.h>
 #include <esp_wifi.h>
 
-static constexpr const char* FIRMWARE_VERSION = "1.3.0";
+static constexpr const char* FIRMWARE_VERSION = "1.3.2";
 static constexpr int SCR_W = 1280, SCR_H = 720;   // landscape, as the page is rendered
 static constexpr int FB_W = 720, FB_H = 1280;     // the panel's native portrait frame buffer
 static constexpr uint16_t PORT = 8765;
@@ -106,7 +109,8 @@ static TouchScript g_script = {0, 0, 0, 0, 0, 0};
 static TouchScript g_script2 = {0, 0, 0, 0, 0, 0};   // a second finger (serial "pinch", "three")
 static TouchScript g_script3 = {0, 0, 0, 0, 0, 0};   // a third (serial "three")
 
-struct Stats { uint32_t updates, rects, strips; uint64_t bytes, decode_us, ppa_us, recv_us; };
+struct Stats { uint32_t updates, rects, strips; uint64_t bytes, decode_us, ppa_us, recv_us;
+               uint32_t gaps[32], gap_max; };   // time between updates shown while streaming, in 10 ms steps
 static Stats g_stats = {};
 
 static int64_t now_ms() { return esp_timer_get_time() / 1000; }
@@ -207,6 +211,19 @@ static bool ppa_blit(const void* src, int x, int y, int w, int h) {
 
 static int64_t g_event_sent = 0;   // when the last event went to the PC
 
+// ---- pacing: a playout buffer for video ----
+// WiFi delivers frames in bunches: sent evenly, they arrived 5 ms apart and then 60 ms apart, and drawn on arrival a
+// 30 fps video skipped a frame on the screen every fifth or so. With "TPTS", the PC sends video frames ahead of time,
+// each with its due time; the Tab5 holds each until then, so they come out evenly. Its clock and the PC's are tied by
+// the fastest deliveries seen (arrival - due + how early it was sent), like the sound's jitter buffer. For a second
+// after a touch or a key, frames are drawn as they come, so nothing waits that the user is acting on.
+static constexpr int64_t PACE_TOUCH_MS = 1000;
+struct Pacing { bool due_on = false, off_ok = false; int64_t due = 0, rise_at = 0; uint32_t off = 0;
+                uint16_t shown_x = 0; };   // for the update's "shown": 0 untimed, else 1 + how late it began (ms)
+static Pacing g_pace;
+struct PaceStats { uint32_t timed, late; int64_t early_ms; };
+static PaceStats g_pstats = {};
+
 static void send_event(uint8_t type, int x, int y, uint8_t flags = 0, uint16_t z = 0) {
   if (!g_have_client || !g_client.connected()) return;
   const Event e = {type, flags, (uint16_t)x, (uint16_t)y, z};
@@ -265,6 +282,21 @@ static bool handle_strip(const RectHeader& h) {
 
 static bool g_update_done = false;   // handle_rect() just finished an update
 
+static void pace_stamp(const RectHeader& h) {
+  Pacing& p = g_pace;
+  const int64_t now = now_ms();
+  const uint32_t due_pc = h.x | (uint32_t)h.y << 16, now32 = (uint32_t)now;
+  const uint32_t sample = now32 - due_pc + (uint32_t)(int32_t)(int16_t)h.w;   // our clock minus the PC's, plus the delay
+  const int32_t d = (int32_t)(sample - p.off);
+  if (!p.off_ok || d < 0 || d > 2000) { p.off = sample; p.off_ok = true; }   // faster than ever (or the PC restarted)
+  if (now >= p.rise_at) { p.off += 1; p.rise_at = now + 2000; }              // follow a clock drifting the other way
+  p.due = now + (int32_t)(due_pc + p.off - now32);
+  p.due_on = true;
+  g_pstats.timed++;
+  if (p.due <= now) g_pstats.late++;
+  else g_pstats.early_ms += p.due - now;
+}
+
 // Receive and draw one rectangle (or the end marker). Returns false if the connection must be dropped.
 static bool handle_rect() {
   RectHeader h;
@@ -278,6 +310,7 @@ static bool handle_rect() {
                   g_gestures ? ", gestures" : "");
     return true;
   }
+  if (memcmp(h.magic, "TPTS", 4) == 0) { pace_stamp(h); return true; }
   if (memcmp(h.magic, "TABS", 4) == 0) return handle_strip(h);
   if (memcmp(h.magic, "TSTR", 4) == 0) { lanes_start(h); return true; }
   if (memcmp(h.magic, "TAB5", 4) != 0) { Serial.println("ERR bad header"); return false; }
@@ -286,10 +319,15 @@ static bool handle_rect() {
     // a once-a-second clock tick doesn't count
     const int64_t now = now_ms();
     if (now - g_last_update < 400) g_last_stream = now;
+    if (const int64_t gap = now - g_last_update; gap < 500) {   // frame pacing: how evenly updates reach the screen
+      g_stats.gaps[min(gap / 10, (int64_t)31)]++;
+      g_stats.gap_max = max(g_stats.gap_max, (uint32_t)gap);
+    }
     g_last_update = now;
     g_stats.updates++;
     g_shown_any = true;
-    send_event(EV_SHOWN, 0, 0);
+    send_event(EV_SHOWN, g_pace.shown_x, 0);   // (x: firmware 1.3.2, timed updates)
+    g_pace.shown_x = 0;
     g_update_done = true;
     return true;
   }
@@ -330,9 +368,10 @@ static void pc_poll() {
     g_client.setNoDelay(true);
     g_have_client = true;
     g_multitouch = g_gestures = false;                // until the PC asks for them
+    g_pace = {};
     g_pc_ip = (uint32_t)g_client.remoteIP();
     Serial.printf("PC connected from %s\n", g_client.remoteIP().toString().c_str());
-    send_event(EV_HELLO, 1, 3, HELLO_SOUND | HELLO_STRIPS | (g_rot == 3 ? HELLO_FLIPPED : 0), 0);   // version 1.3.0
+    send_event(EV_HELLO, 1, 3, HELLO_SOUND | HELLO_STRIPS | (g_rot == 3 ? HELLO_FLIPPED : 0), 2);   // version 1.3.2
     lanes_offer();
   }
   if (!g_have_client) return;
@@ -364,8 +403,15 @@ static void pc_poll() {
   if (g_lanes_on && now - g_event_sent >= 20 && (now - g_last_update < 500 || now - g_last_touch < 500))
     send_event(EV_NUDGE, 0, 0);
   g_update_done = false;
-  while (!g_update_done && (g_lanes_on ? lanes_ready() : g_client.available() >= (int)sizeof(RectHeader)))
+  while (!g_update_done && (g_lanes_on ? lanes_ready() : g_client.available() >= (int)sizeof(RectHeader))) {
+    if (g_pace.due_on) {   // a timed update: wait for its turn (it stays in the lane buffers meanwhile)
+      const int64_t now = now_ms();
+      if (now < g_pace.due && now - g_last_touch > PACE_TOUCH_MS) break;
+      g_pace.due_on = false;
+      g_pace.shown_x = 1 + (uint16_t)constrain(now - g_pace.due, (int64_t)0, (int64_t)60000);
+    }
     if (!handle_rect()) { g_client.stop(); break; }
+  }
 }
 
 // ---- WiFi ---------------------------------------------------------------------------------------------------
@@ -632,6 +678,17 @@ static void print_stats() {
                 (unsigned)a.packets, (unsigned)a.late, (unsigned)a.lost_frames, (unsigned)a.holdups, (unsigned)a.dropped,
                 (unsigned)a.repeated, (int)(g_level * 1000 / AUDIO_RATE), g_target * 1000 / AUDIO_RATE,
                 g_spk_ready ? "on" : "off", g_vol);
+  uint32_t ngaps = 0, acc = 0, p50 = 0, p95 = 0, over50 = 0;
+  for (int i = 0; i < 32; ++i) { ngaps += g_stats.gaps[i]; if (i >= 5) over50 += g_stats.gaps[i]; }
+  for (int i = 0; i < 32 && ngaps; ++i) {
+    acc += g_stats.gaps[i];
+    if (!p50 && acc * 2 >= ngaps) p50 = i * 10 + 5;
+    if (!p95 && acc * 100 >= ngaps * 95) p95 = i * 10 + 5;
+  }
+  if (ngaps) Serial.printf("pacing | %u gaps between updates shown: p50 ~%u ms, p95 ~%u ms, max %u ms, over 50 ms %u"
+                           " | timed %u, late %u, early by %lld ms on average\n", ngaps, p50, p95, g_stats.gap_max, over50,
+                           g_pstats.timed, g_pstats.late, g_pstats.timed ? g_pstats.early_ms / g_pstats.timed : 0LL);
+  g_pstats = {};
   char batt[128];
   battery_text(batt, sizeof(batt));
   Serial.printf("battery | %s\n", batt);

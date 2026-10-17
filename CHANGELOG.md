@@ -3,6 +3,24 @@
 Versions follow [semantic versioning](https://semver.org). The firmware prints its version at boot, in the serial
 `S` statistics and in its settings panel; the server prints it at start and with `--version`.
 
+## 1.3.2 - 2026-10-17
+
+Firmware and server. Older firmware and servers work with these, without the playout buffer.
+
+- **Smooth video playback (firmware 1.3.2 with server 1.3.2):** frames left the PC evenly, but WiFi delivered them
+  in bunches, and drawn on arrival a 30 fps video skipped on the screen several times a second. Now the server sends
+  video frames 100 ms ahead with their due time, and the Tab5 holds each until then and shows it 60 ms after the
+  clock, as the sound. For a second after a touch or a key, frames are drawn at once, so pausing and seeking stay
+  immediate. The Tab5 reports in each "shown" how late a frame began, and the quality adapts to keep that rare.
+  Detailed footage: 29.8 fps instead of 27.9, gaps over 50 ms 3 % instead of 13 %, the 95th percentile gap 45 ms
+  instead of 85, at the same quality. Needs the lanes; `--no-pacing` turns it off.
+- **Fix: smooth or dark footage went out at three times the size.** Such video changes many tiles by less than the
+  noise threshold in any one frame, so a frame counted as mostly still and went out at quality 88 in full colour
+  (about 180 KB instead of 55 at quality 35), which overloaded WiFi and stuttered. A tile now counts as moving if it
+  changed in the last 0.2 s, and a video file is all motion. This also helps videos in web pages.
+- **Frame pacing statistics:** the serial `S` output has a `pacing` line (gaps between updates shown, how many over
+  50 ms, timed and late frames), and the server's `-v` line shows the gaps and stutters.
+
 ## 1.3.1 - 2026-10-16
 
 Server only; use it with firmware 1.3.0.
