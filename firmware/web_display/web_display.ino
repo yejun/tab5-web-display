@@ -6,7 +6,7 @@
 //             { "TAB5", u16 x, y, w, h, u32 len } (little endian) and `len` bytes of baseline JPEG; x, y, w and h
 //             are multiples of 16. The end marker is a header with w = h = len = 0.
 //             A header with magic "TCFG" instead is settings: x = WiFi power save (0 auto, 1 always off),
-//             y = 1: send every finger (multi-touch), not only the first.
+//             y bits: 1 = send every finger (multi-touch), not only the first; 2 = send gestures (below).
 //             Magic "TABS" is a strip: landscape columns x..x+w at full height (y = 0, h = 720), sent as a
 //             720-wide, w-tall JPEG already rotated into the panel's portrait orientation, and decoded straight
 //             into the frame buffer (see handle_strip).
@@ -18,16 +18,21 @@
 //             sees them. 7 = lanes (offer and answer): the stream can continue over several connections, see lanes.h.
 //             8 = nudge: nothing, sent while the stream is on lanes so that a lost event is resent quickly.
 //             9 = key (keyboard.h): flags 1 = down, 0 = up; x = USB HID usage code, y = HID modifier bits.
+//             10 = gesture (only if the PC asked for them): x = 1 swipe in from the left edge, 2 from the right,
+//             3 from the bottom, 4 three fingers swiped right, 5 three fingers swiped left. The PC switches and
+//             closes browser tabs, and goes back and forward, with them.
 // Sound arrives separately as UDP, see audio.h.
 //
 // Each rectangle is decoded by the P4's hardware JPEG engine to RGB565 and rotated into the panel's portrait
 // frame buffer by the PPA (both DMA, the CPU only waits).
 //
-// Settings (WiFi, brightness, volume, flip): swipe in from any edge, or tap the screen while no page is shown. The panel
+// Settings (WiFi, brightness, volume, flip): swipe in from the top edge (from any edge with a PC that doesn't take
+// gestures, and while no page is shown), or tap the screen while no page is shown. The panel
 // (settings_ui.h, LVGL) also opens by itself when no WiFi network is configured or the saved one can't be joined.
 //
 // Serial commands: ip | wifi <ssid> <password> | wifiinfo | rot | rot auto | S (stats) | F (dump the frame buffer, see tools/shot.py)
 //                  | T <x> <y> (scripted tap) | drag <x0> <y0> <x1> <y1> [ms] | pinch <cx> <cy> <d0> <d1> [ms]
+//                  | three <x0> <x1> <y> [ms] (three-finger swipe)
 //                  | panel (open the settings)
 //                  | beep (speaker check) | forget (erase saved settings and restart)
 #include <M5Unified.h>
@@ -53,8 +58,10 @@ static constexpr int64_t AWAKE_AFTER_SOUND_MS = 1000;    // ... and this long af
 static constexpr int64_t CONNECT_TIMEOUT_MS = 20000, RETRY_MS = 30000;
 static constexpr int EDGE = 40, SWIPE_IN = 120;           // edge swipe: start within EDGE px, move SWIPE_IN px inwards
 static constexpr int64_t SWIPE_MS = 700;
+static constexpr int SWIPE3 = 150;                    // three fingers moved this far sideways: back / forward
 
-enum : uint8_t { EV_DOWN = 1, EV_MOVE = 2, EV_UP = 3, EV_SHOWN = 5, EV_HELLO = 6, EV_LANES = 7, EV_NUDGE = 8, EV_KEY = 9 };
+enum : uint8_t { EV_DOWN = 1, EV_MOVE = 2, EV_UP = 3, EV_SHOWN = 5, EV_HELLO = 6, EV_LANES = 7, EV_NUDGE = 8, EV_KEY = 9, EV_GESTURE = 10 };
+enum : uint8_t { GEST_LEFT = 1, GEST_RIGHT = 2, GEST_BOTTOM = 3, GEST_THREE_RIGHT = 4, GEST_THREE_LEFT = 5 };
 enum : uint8_t { HELLO_SOUND = 1, HELLO_STRIPS = 2, HELLO_FLIPPED = 4 };   // hello flags
 
 #pragma pack(push, 1)
@@ -83,6 +90,7 @@ static int64_t g_last_update = 0, g_last_stream = -AWAKE_AFTER_STREAM_MS;
 static bool g_wifi_sleep = true;
 static uint8_t g_power_mode = 0;          // from the PC: 0 = auto, 1 = power save always off
 static bool g_multitouch = false;         // from the PC: it takes every finger
+static bool g_gestures = false;           // from the PC: it takes edge and three-finger swipes (tabs, back)
 static uint8_t g_kled = 10;               // keyboard light brightness, 0 (off) to 100
 
 enum WifiState { WIFI_NONE, WIFI_CONNECTING, WIFI_UP, WIFI_FAILED };
@@ -95,7 +103,8 @@ struct TouchPoint { bool pressed; int x, y; };             // (types up here: Ar
 struct Finger { int id, x, y; };
 struct TouchScript { int64_t t0; int ms, x0, y0, x1, y1; };
 static TouchScript g_script = {0, 0, 0, 0, 0, 0};
-static TouchScript g_script2 = {0, 0, 0, 0, 0, 0};   // a second finger (serial "pinch")
+static TouchScript g_script2 = {0, 0, 0, 0, 0, 0};   // a second finger (serial "pinch", "three")
+static TouchScript g_script3 = {0, 0, 0, 0, 0, 0};   // a third (serial "three")
 
 struct Stats { uint32_t updates, rects, strips; uint64_t bytes, decode_us, ppa_us, recv_us; };
 static Stats g_stats = {};
@@ -264,7 +273,9 @@ static bool handle_rect() {
   if (memcmp(h.magic, "TCFG", 4) == 0) {   // a setting
     g_power_mode = h.x == 1 ? 1 : 0;
     g_multitouch = h.y & 1;
-    Serial.printf("PC: WiFi power save %s, %s\n", g_power_mode ? "off" : "auto", g_multitouch ? "multi-touch" : "one finger");
+    g_gestures = h.y & 2;
+    Serial.printf("PC: WiFi power save %s, %s%s\n", g_power_mode ? "off" : "auto", g_multitouch ? "multi-touch" : "one finger",
+                  g_gestures ? ", gestures" : "");
     return true;
   }
   if (memcmp(h.magic, "TABS", 4) == 0) return handle_strip(h);
@@ -318,7 +329,7 @@ static void pc_poll() {
     g_client = incoming;
     g_client.setNoDelay(true);
     g_have_client = true;
-    g_multitouch = false;                             // until the PC asks for it
+    g_multitouch = g_gestures = false;                // until the PC asks for them
     g_pc_ip = (uint32_t)g_client.remoteIP();
     Serial.printf("PC connected from %s\n", g_client.remoteIP().toString().c_str());
     send_event(EV_HELLO, 1, 3, HELLO_SOUND | HELLO_STRIPS | (g_rot == 3 ? HELLO_FLIPPED : 0), 0);   // version 1.3.0
@@ -465,11 +476,11 @@ static int read_fingers(Finger* f) {
   if (dt >= 0 && dt < g_script.ms) {
     const TouchPoint t = read_touch();
     f[0] = {0, t.x, t.y};
-    const TouchScript& b = g_script2;
-    if (b.t0 != g_script.t0) return 1;
-    const float k = (float)dt / b.ms;
-    f[1] = {1, b.x0 + (int)((b.x1 - b.x0) * k), b.y0 + (int)((b.y1 - b.y0) * k)};
-    return 2;
+    int n = 1;
+    const float k = (float)dt / g_script.ms;
+    for (const TouchScript* b : {&g_script2, &g_script3})
+      if (b->t0 == g_script.t0) { f[n] = {n, b->x0 + (int)((b->x1 - b->x0) * k), b->y0 + (int)((b->y1 - b->y0) * k)}; ++n; }
+    return n;
   }
   int n = 0;
   for (int i = 0; i < M5.Touch.getCount() && n < 5; ++i) {
@@ -491,11 +502,14 @@ static void script_touch(int x0, int y0, int x1, int y1, int ms) { g_script = {n
 // settles it: a pinch or two-finger scroll is for the page).
 // With multi-touch, every finger goes to the PC and the browser makes pinch zoom and scrolling of them. Otherwise
 // (an older server, or a video) only the first finger does, and the touch ends when it lifts.
+// With gestures, only the top edge opens the settings: a swipe in from the left, right or bottom edge goes to the PC
+// as a gesture (tabs), and so does three fingers swiped sideways (back / forward), which the page never sees.
 
 static void handle_touch() {
-  enum { IDLE, EDGE_PENDING, FORWARDING, LOCAL, IGNORE };
+  enum { IDLE, EDGE_PENDING, FORWARDING, LOCAL, IGNORE, THREE };
   static int st = IDLE;
-  static int first, sx, sy;           // the finger that started the touch, and where
+  static int first, sx, sy;
+  static int tx, ty;                  // three fingers: where their middle started           // the finger that started the touch, and where
   static Finger sent[5];              // fingers the PC has been told are down, where it last heard of them
   static int nsent = 0;
   static int64_t t0, last_move;
@@ -538,13 +552,34 @@ static void handle_touch() {
       // inward distance from the edge the touch started at
       const int in = sx < EDGE ? p->x - sx : sx >= SCR_W - EDGE ? sx - p->x : sy < EDGE ? p->y - sy : sy - p->y;
       const int along = (sx < EDGE || sx >= SCR_W - EDGE) ? abs(p->y - sy) : abs(p->x - sx);
-      if (in >= SWIPE_IN) { st = IGNORE; panel_open(); return; }
+      if (in >= SWIPE_IN) {
+        st = IGNORE;
+        const int edge = sx < EDGE ? GEST_LEFT : sx >= SCR_W - EDGE ? GEST_RIGHT : sy < EDGE ? 0 : GEST_BOTTOM;
+        if (g_gestures && edge) send_event(EV_GESTURE, edge, 0);
+        else panel_open();
+        return;
+      }
       forward = along > SWIPE_IN / 2;
     }
     if (!forward) return;
     st = FORWARDING;   // not a swipe: hand the whole touch to the page, from where it started
     send_event(EV_DOWN, sx, sy, wire(first));
     sent[nsent++] = {first, sx, sy};
+  }
+  int mx = 0, my = 0;   // the fingers' middle
+  for (int i = 0; i < n; ++i) { mx += f[i].x / n; my += f[i].y / n; }
+  if (st == FORWARDING && g_gestures && n >= 3) {   // three fingers: a gesture, not for the page; take back the others
+    for (int j = 0; j < nsent; ++j) send_event(EV_UP, sent[j].x, sent[j].y, wire(sent[j].id));
+    nsent = 0;
+    st = THREE;
+    tx = mx; ty = my;
+  }
+  if (st == THREE) {
+    if (n >= 3 && abs(mx - tx) >= SWIPE3 && abs(mx - tx) > 2 * abs(my - ty)) {   // (while all three are down)
+      send_event(EV_GESTURE, mx > tx ? GEST_THREE_RIGHT : GEST_THREE_LEFT, 0);
+      st = IGNORE;
+    }
+    return;
   }
   if (st != FORWARDING) return;
   const bool move_due = now - last_move >= 16;
@@ -655,6 +690,15 @@ static void handle_serial() {
       sscanf(line.c_str() + 5, "%d %d %d %d %d", &x0, &y0, &x1, &y1, &ms);
       script_touch(x0, y0, x1, y1, ms);
       Serial.printf("drag %d,%d -> %d,%d in %d ms\n", x0, y0, x1, y1, ms);
+    } else if (line.startsWith("three ")) {   // three x0 x1 y [ms]: three fingers (80 px apart) moved sideways
+      int x0 = 400, x1 = 800, y = 360, ms = 400;
+      sscanf(line.c_str() + 6, "%d %d %d %d", &x0, &x1, &y, &ms);
+      g_last_touch = now_ms();
+      set_wifi_sleep(false);
+      script_touch(x0, y - 80, x1, y - 80, ms);
+      g_script2 = {g_script.t0, ms, x0, y, x1, y};
+      g_script3 = {g_script.t0, ms, x0, y + 80, x1, y + 80};
+      Serial.printf("three fingers %d -> %d at y %d in %d ms\n", x0, x1, y, ms);
     } else if (line.startsWith("pinch ")) {   // pinch cx cy d0 d1 [ms]: two fingers, d0 apart -> d1 apart (sideways)
       int cx = 640, cy = 360, d0 = 100, d1 = 400, ms = 500;
       sscanf(line.c_str() + 6, "%d %d %d %d %d", &cx, &cy, &d0, &d1, &ms);
@@ -662,6 +706,7 @@ static void handle_serial() {
       set_wifi_sleep(false);
       script_touch(cx - d0 / 2, cy, cx - d1 / 2, cy, ms);
       g_script2 = {g_script.t0, ms, cx + d0 / 2, cy, cx + d1 / 2, cy};
+      g_script3 = {};
       Serial.printf("pinch at %d,%d: %d -> %d px in %d ms\n", cx, cy, d0, d1, ms);
     } else if (line == "beep") {   // speaker check: a 1 kHz tone, and the codec and amplifier state
       const bool on = speaker_on();
@@ -689,7 +734,7 @@ static void handle_serial() {
       const int sp = line.indexOf(' ', 5);
       wifi_start(sp > 0 ? line.substring(5, sp) : line.substring(5), sp > 0 ? line.substring(sp + 1) : "");
     } else if (line.length()) {
-      Serial.println("commands: ip | wifi <ssid> <password> | wifiinfo | rot | rot auto | S | F | T <x> <y> | drag x0 y0 x1 y1 [ms] | pinch cx cy d0 d1 [ms] | panel | beep | forget");
+      Serial.println("commands: ip | wifi <ssid> <password> | wifiinfo | rot | rot auto | S | F | T <x> <y> | drag x0 y0 x1 y1 [ms] | pinch cx cy d0 d1 [ms] | three x0 x1 y [ms] | panel | beep | forget");
     }
     line = "";
   }

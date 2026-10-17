@@ -17,6 +17,11 @@ Versions follow [semantic versioning](https://semver.org). The firmware prints i
   a PC connected, dim blue with WiFi but no PC, amber without WiFi, blinking red below 10 % battery. "Key lights"
   in the settings sets their brightness (left end: off). Serial `kbr <reg>` / `kbw <reg> <value>` read and write
   the keyboard's registers.
+- **Tabs and back/forward (firmware 1.3 with server 1.3):** a link that opens a new tab (target=_blank,
+  window.open) used to open it out of sight, so the tap seemed to do nothing; it is now shown at once. Swipe in from
+  the right / left edge for the next / previous tab, up from the bottom to close it (not the last one). Three
+  fingers swiped left / right go back / forward, as do Alt+arrows. A note at the top shows the tab and title for
+  1.5 s. The settings now open from the top edge only (any edge with older servers and with videos).
 - **Rotation follows the keyboard:** until the flip switch is first used, the Tab5 starts flipped when a keyboard
   is fitted (upright in the keyboard, as in M5Stack's examples) and normal without one. The switch shows the
   rotation in use; toggling it saves the choice, which then always wins. Serial `rot auto` forgets a saved choice.

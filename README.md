@@ -34,7 +34,7 @@ Version 1.2.2 (firmware 1.2.0) · MIT licence
 - **Built-in apps that need no API keys:** a home launcher, a dashboard, a clock with calendar, sticky notes, a
   Chinese almanac (老黄历), and a touch demo with a motion test.
 - **Setup on the device.** A settings panel opens on first start to pick a WiFi network with an on-screen keyboard.
-  Later, swipe in from any screen edge to change WiFi, brightness or orientation, or to check the battery.
+  Later, swipe down from the top edge to change WiFi, brightness or orientation, or to check the battery.
 - **No firewall changes.** The Tab5 listens and the PC connects out to it.
 
 ## What you need
@@ -165,8 +165,14 @@ screen and plays in a loop.
 
 ## Settings on the Tab5
 
-**Opening the panel:** swipe in from any screen edge, or tap the screen when no page is shown. The panel also opens
-by itself on first start, and whenever the saved network can't be joined.
+**Opening the panel:** swipe down from the top edge, or tap the screen when no page is shown. (With a video, or a
+server older than 1.3, any edge works.) The panel also opens by itself on first start, and whenever the saved
+network can't be joined.
+
+**Tabs and history (pages):** a link that opens a new tab shows it at once. Swipe in from the right edge for the
+next tab, from the left edge for the one before, and up from the bottom edge to close the tab. Three fingers
+swiped left go back, swiped right go forward (Alt+arrows on the keyboard too). A note at the top says where you
+are, e.g. "2 / 3 · Page title".
 
 **What's in it:**
 - **WiFi:**
@@ -320,8 +326,8 @@ USB serial at 115200 baud:
 
 ## Troubleshooting
 
-- **"No Tab5 found on USB":** pass `--device <ip>`. The address is in the Tab5's settings (swipe in from an
-  edge).
+- **"No Tab5 found on USB":** pass `--device <ip>`. The address is in the Tab5's settings (swipe down from the
+  top edge).
 - **The Tab5 says "Waiting for the PC" but nothing appears:**
   - The PC and the Tab5 must be able to reach each other: same network, or routed.
   - Check that the server prints `showing on Tab5`.

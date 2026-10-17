@@ -78,7 +78,12 @@ SOFT_MIN = 48         # 4:2:0 only for pieces this big both ways: the Tab5's dec
 TOUCH_QUIET_S = 0.5   # ... but only one in flight this soon after a touch, where delay matters more than frame rate
 RECT = struct.Struct("<4sHHHHI")   # "TAB5" (or "TABS", a strip), x, y, w, h, jpeg length
 EVENT = struct.Struct("<BBHHH")    # type, flags, x, y, z
-EV_DOWN, EV_MOVE, EV_UP, EV_SHOWN, EV_HELLO, EV_LANES, EV_KEY = 1, 2, 3, 5, 6, 7, 9
+EV_DOWN, EV_MOVE, EV_UP, EV_SHOWN, EV_HELLO, EV_LANES, EV_KEY, EV_GESTURE = 1, 2, 3, 5, 6, 7, 9, 10
+# Gestures (firmware 1.3, when asked for): swipes in from the left / right / bottom edge (the top one opens the Tab5's
+# settings), and three fingers swiped right / left. They switch and close tabs, and go back and forward.
+GEST_LEFT, GEST_RIGHT, GEST_BOTTOM, GEST_THREE_RIGHT, GEST_THREE_LEFT = 1, 2, 3, 4, 5
+TCFG_MULTITOUCH, TCFG_GESTURES = 1, 2
+TOAST_S = 1.5         # a note at the top of the screen (which tab, back, ...) shows this long
 # Keys (firmware 1.3, with M5Stack's Tab5 Keyboard): EV_KEY carries flags 1 = down / 0 = up, x = a USB HID usage
 # code, y = HID modifier bits. Each code's DOM key (unshifted, shifted), DOM code and Windows key code:
 HID_CTRL, HID_SHIFT, HID_ALT = 1, 2, 4
@@ -443,9 +448,14 @@ class Mirror:
     """One Chromium page mirrored to the Tab5: frames out, touches and keys in."""
 
     multitouch = True   # ask the Tab5 for every finger (firmware 1.3): the browser pinch-zooms and scrolls with them
+    gestures = True     # ... and for its swipes: tabs, back and forward
 
     def __init__(self, page, cdp, args, audio):
         self.page, self.cdp, self.args, self.audio = page, cdp, args, audio
+        self.tabs = [page] if page else []   # the browser's tabs, oldest first; self.page is the one shown
+        self.home = None                     # the start page, opened again should the last tab close itself
+        self.toast, self.toast_until = None, 0.0
+        self.toast_font = ImageFont.load_default(size=26)
         self.writer = None
         self.dirty = asyncio.Event()
         self.touch_at = None          # when the last touch event arrived, for the touch -> shown latency
@@ -496,14 +506,119 @@ class Mirror:
             self.dirty.set()
 
     async def capture(self):
-        """What the page looks like now: the newest decoded screencast frame. Chromium sends a lossless frame every
-        time it paints, so nothing else is asked of it here. (Page.captureScreenshot while the screencast runs
-        occasionally never returned, which froze the whole mirror.)"""
+        """What the page looks like now: the newest decoded screencast frame (with the note on top, if one is
+        showing). Chromium sends a lossless frame every time it paints, so nothing else is asked of it here.
+        (Page.captureScreenshot while the screencast runs occasionally never returned, which froze the mirror.)"""
         for _ in range(100):   # nothing painted yet: wait for the first frame
             if self.frame is not None:
+                if self.toast and time.monotonic() < self.toast_until:
+                    return await asyncio.to_thread(self.draw_toast, self.frame, self.toast)
                 return self.frame
             await asyncio.sleep(0.05)
         raise TimeoutError("no frame from Chromium")
+
+    # ---- tabs ----
+
+    async def attach(self, page):
+        """Show this tab: its screencast, and touches and keys go to it. The previous tab's screencast stops."""
+        old, cdp = self.cdp, await page.context.new_cdp_session(page)
+
+        async def on_frame(ev):   # Chromium sends a (lossless) frame whenever it paints; keep only the newest
+            if cdp is self.cdp:
+                self.frame_arrived(ev["data"])
+            try:
+                await cdp.send("Page.screencastFrameAck", {"sessionId": ev["sessionId"]})
+            except Exception:
+                pass   # the tab closed
+        cdp.on("Page.screencastFrame", on_frame)
+        self.page, self.cdp = page, cdp
+        if old is not None:
+            try:
+                await old.send("Page.stopScreencast")
+                await old.detach()
+            except Exception:
+                pass
+        await page.bring_to_front()   # a tab in the background is hidden: it doesn't paint, and its timers slow down
+        await cdp.send("Page.startScreencast", {"format": "png", "maxWidth": W, "maxHeight": H})
+        self.dirty.set()
+
+    def watch_tabs(self, ctx):
+        """New tabs (a link with target=_blank, window.open) are shown at once, as in a browser."""
+        self.tabs[0].on("close", self.tab_closed)
+        ctx.on("page", lambda page: asyncio.create_task(self.tab_opened(page)))
+
+    async def tab_opened(self, page):
+        self.tabs.append(page)
+        page.on("close", self.tab_closed)
+        await self.attach(page)
+        await self.show_tab()
+
+    def tab_closed(self, page):
+        if page not in self.tabs:
+            return
+        i = self.tabs.index(page)
+        self.tabs.remove(page)
+        if page is self.page:
+            asyncio.create_task(self.after_close(page, min(i, len(self.tabs) - 1)))
+
+    async def after_close(self, page, i):
+        if not self.tabs:   # the page closed its own, last tab: open the start page again (shown via tab_opened)
+            await (await page.context.new_page()).goto(self.home)
+            return
+        await self.attach(self.tabs[i])
+        await self.show_tab()
+
+    async def show_tab(self):
+        page, n = self.page, len(self.tabs)
+        try:
+            title = await asyncio.wait_for(page.title(), 0.5)
+        except Exception:
+            title = ""
+        title = title or page.url.split("//")[-1].split("/")[0] or "New tab"
+        self.show_toast(f"{self.tabs.index(page) + 1} / {n}  ·  {title}" if n > 1 else title)
+
+    async def gesture(self, code):
+        n = len(self.tabs)
+        if code in (GEST_LEFT, GEST_RIGHT):   # in from the right: the next tab; from the left: the one before
+            i = self.tabs.index(self.page) + (1 if code == GEST_RIGHT else -1)
+            if 0 <= i < n:
+                await self.attach(self.tabs[i])
+            await self.show_tab()
+        elif code == GEST_BOTTOM:             # close the tab (not the last one)
+            if n > 1:
+                await self.page.close()       # tab_closed shows the next one
+            else:
+                self.show_toast("The last tab stays open")
+        elif code in (GEST_THREE_RIGHT, GEST_THREE_LEFT):
+            await self.history(1 if code == GEST_THREE_RIGHT else -1)   # as the browser's buttons: -> forward
+
+    async def history(self, step):
+        """Back (-1) or forward (+1) in the tab's history."""
+        try:
+            h = await asyncio.wait_for(self.cdp.send("Page.getNavigationHistory"), 2)
+            i = h["currentIndex"] + step
+            if not 0 <= i < len(h["entries"]):
+                self.show_toast("No page to go back to" if step < 0 else "No page to go forward to")
+                return
+            await asyncio.wait_for(self.cdp.send("Page.navigateToHistoryEntry", {"entryId": h["entries"][i]["id"]}), 2)
+            self.show_toast("Back" if step < 0 else "Forward")
+        except TIMEOUTS:
+            print("back / forward timed out (page busy)")
+
+    def show_toast(self, text):
+        self.toast, self.toast_until = text, time.monotonic() + TOAST_S
+        self.dirty.set()
+        asyncio.get_running_loop().call_later(TOAST_S + 0.05, self.dirty.set)   # and redraw without it
+
+    def draw_toast(self, frame, text):
+        img = Image.fromarray(frame)
+        d = ImageDraw.Draw(img, "RGBA")
+        while len(text) > 4 and d.textlength(text, font=self.toast_font) > W * 0.6:
+            text = text[:-2].rstrip() + "…" if not text.endswith("…") else text[:-2] + "…"
+        w = d.textlength(text, font=self.toast_font)
+        d.rounded_rectangle(((W - w) / 2 - 28, 24, (W + w) / 2 + 28, 80), 28, fill=(20, 22, 28, 215))
+        d.text((W / 2, 52), text, font=self.toast_font, fill=(255, 255, 255, 255), anchor="mm")
+        return np.asarray(img)
 
     async def touch(self, kind, x, y, fingers):
         """fingers: every finger down after this event. Chromium compares them with the previous event's, so a finger
@@ -519,6 +634,10 @@ class Mirror:
 
     async def key(self, down, code, mod, repeat=False):
         if code not in HID_KEYS:
+            return
+        if mod == HID_ALT and code in (0x50, 0x4F):   # Alt+Left / Right: back / forward, as in a browser
+            if down and not repeat:
+                await self.history(-1 if code == 0x50 else 1)
             return
         name, shifted, dom_code, vk = HID_KEYS[code]
         key = shifted if mod & HID_SHIFT and shifted else name
@@ -579,7 +698,12 @@ class Mirror:
             self.input_wake.clear()
             while self.inputs:
                 kind, *rest = self.inputs.popleft()
-                await (self.key(*rest) if kind == EV_KEY else self.touch(kind, *rest))
+                if kind == EV_KEY:
+                    await self.key(*rest)
+                elif kind == EV_GESTURE:
+                    await self.gesture(*rest)
+                else:
+                    await self.touch(kind, *rest)
 
     async def read_events(self, reader):
         while True:
@@ -600,6 +724,11 @@ class Mirror:
                 self.acked.set()
             elif kind in (EV_DOWN, EV_MOVE, EV_UP):
                 self.queue_touch(kind, flags, x, y)
+            elif kind == EV_GESTURE:
+                if self.args.verbose:
+                    print(f"gesture {x}")
+                self.inputs.append((EV_GESTURE, x))
+                self.input_wake.set()
             elif kind == EV_KEY:
                 if self.args.verbose:
                     print(f"key {'down' if flags & 1 else 'up'} {HID_KEYS.get(x, ('0x%02x' % x,))[0]!r} modifiers {y}")
@@ -611,7 +740,7 @@ class Mirror:
                     self.lane_answer = flags
                     self.lane_answered.set()
             elif kind == EV_HELLO:   # firmware 1.1 or later: it takes settings and can play sound
-                self.writer.write(RECT.pack(b"TCFG", POWER_SAVE[self.args.power_save], int(self.multitouch), 0, 0, 0))
+                self.writer.write(RECT.pack(b"TCFG", POWER_SAVE[self.args.power_save], self.multitouch * TCFG_MULTITOUCH | self.gestures * TCFG_GESTURES, 0, 0, 0))
                 if self.audio and flags & HELLO_SOUND:
                     self.audio.target = (self.host, PORT)
                 self.strips, self.flipped = bool(flags & HELLO_STRIPS), bool(flags & HELLO_FLIPPED)
@@ -1070,7 +1199,7 @@ class VideoMirror(Mirror):
     the position while paused or seeking and for a few seconds after a touch. With the keyboard: Space pauses and
     resumes, the left and right arrows seek, and 0-9 jump to 0-90 % of the way through."""
 
-    multitouch = False   # one finger: tap and drag
+    multitouch = gestures = False   # one finger: tap and drag (every edge swipe opens the settings)
 
     def __init__(self, args, audio, path, info):
         super().__init__(None, None, args, audio)
@@ -1411,17 +1540,12 @@ async def run(args, url, watch, settings, host, audio):
             await page.goto(url)
         except Exception as e:   # e.g. no network: Chromium shows its error page, and the user can still navigate
             print(f"could not load {url}: {str(e).splitlines()[0]}")
-        cdp = await ctx.new_cdp_session(page)
-        mirror = Mirror(page, cdp, args, audio)
+        mirror = Mirror(page, None, args, audio)
+        mirror.home = url
+        await mirror.attach(page)
+        mirror.watch_tabs(ctx)
         if audio:
             asyncio.create_task(audio.run())
-
-        # Chromium sends a (lossless) frame whenever it paints; keep only the newest.
-        async def on_frame(ev):
-            mirror.frame_arrived(ev["data"])
-            await cdp.send("Page.screencastFrameAck", {"sessionId": ev["sessionId"]})
-        cdp.on("Page.screencastFrame", on_frame)
-        await cdp.send("Page.startScreencast", {"format": "png", "maxWidth": W, "maxHeight": H})
         if watch:
             asyncio.create_task(watch_page(page, watch))
 
