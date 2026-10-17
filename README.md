@@ -2,9 +2,10 @@
 
 Turn an [M5Stack Tab5](https://docs.m5stack.com/en/core/Tab5) into a touch screen for web pages. A small Python
 server renders a page in headless Chromium on your PC, sends what changed to the Tab5 over WiFi, and passes your
-taps and drags back to the page. Several ready-made apps are included, and you can show any URL or local HTML file.
+touches (and keys, with M5Stack's Tab5 Keyboard) back to the page. Several ready-made apps are included, and you can
+show any URL, local HTML file or video.
 
-Version 1.2.2 (firmware 1.2.0) · MIT licence
+Version 1.3.0 (firmware 1.3.0) · MIT licence
 
 ![Home launcher on the Tab5](docs/home.png)
 
@@ -20,7 +21,12 @@ Version 1.2.2 (firmware 1.2.0) · MIT licence
 ## Features
 
 - **Any web page with real touch.** Taps, drags, sliders and canvas drawing work, because the page runs in a
-  real browser on the PC.
+  real browser on the PC. Every finger counts, so pages pinch-zoom and scroll as on a phone.
+- **Tabs and history.** A link that opens a new tab shows it. Swipe in from the side edges to switch tabs, up from
+  the bottom to close one; three fingers swiped sideways go back and forward.
+- **Keyboard.** With [M5Stack's Tab5 Keyboard](https://docs.m5stack.com/en/tab5/Tab5_Keyboard) fitted, you type
+  into the page; it also controls videos and types the WiFi password. Its two lights show the connection and the
+  Sym / Aa keys.
 - **Fast and light on the Tab5.**
   - **Only the 16×16 tiles that changed are sent.** An idle page with a ticking clock costs about 1.4 KB a second.
   - **The Tab5 barely works.** Its hardware JPEG decoder does the drawing, large changes straight into the
@@ -30,7 +36,7 @@ Version 1.2.2 (firmware 1.2.0) · MIT licence
 - **Sound.** What the page plays comes out of the Tab5's speaker or headphone jack, about a tenth of a second
   behind the PC, the same as the picture. Needs a Linux PC with PulseAudio or PipeWire.
 - **Videos.** `--file clip.mp4` plays any video ffmpeg can decode, in a loop and with sound, at up to 30 fps.
-  Tap to pause, drag sideways to seek.
+  Tap to pause, drag sideways to seek. Videos in web pages (YouTube) play at up to about 26 fps.
 - **Built-in apps that need no API keys:** a home launcher, a dashboard, a clock with calendar, sticky notes, a
   Chinese almanac (老黄历), and a touch demo with a motion test.
 - **Setup on the device.** A settings panel opens on first start to pick a WiFi network with an on-screen keyboard.
@@ -39,7 +45,7 @@ Version 1.2.2 (firmware 1.2.0) · MIT licence
 
 ## What you need
 
-- **An M5Stack Tab5.**
+- **An M5Stack Tab5.** Optionally M5Stack's Tab5 Keyboard.
 - **A PC on the same network** with Python 3.9 or newer. Tested on Linux; macOS and Windows should work but are
   untested.
 - **Chromium, Google Chrome or Microsoft Edge.** The server finds them on the `PATH` or in their usual install
@@ -116,10 +122,12 @@ python3 -m venv .venv
 Any file ffmpeg can play as a video works: MP4, MKV, WebM, MOV, animated GIF, and so on. It is scaled to fit the
 screen and plays in a loop.
 
-- **Tap** to pause or resume.
+- **Tap** to pause or resume (or **Space** on the keyboard).
 - **Drag sideways** to seek: across the whole screen is 2 minutes (or the whole video, if shorter). While the bar
   shows, drag on the bar itself to put the position under your finger, or tap it to jump there. A seek stops at
   the start and the end; letting go at the end plays the last moment, then the video starts over.
+- **Keyboard:** the left and right arrows seek 5 s, and keep going while held (6× further with Aa); 0–9 jump to
+  0–90 % of the way through.
 - **The bar** at the bottom shows the time, the length and the file name. It stays while paused or seeking, and
   fades out 3 seconds after a touch while playing.
 - **Picture quality** adapts to what WiFi carries: detailed footage plays at about 28 fps, simple footage at the
@@ -158,7 +166,9 @@ screen and plays in a loop.
 
 - **Size:** design for **1280×720** at a device pixel ratio of 1. The page is shown 1:1.
 - **Edges:** keep buttons more than 40 px from the screen edges. A touch that starts there is held back for up to
-  0.7 s while the Tab5 checks for the settings swipe.
+  0.7 s while the Tab5 checks for a swipe (settings, tabs).
+- **Touch and keys** arrive as normal touch and keyboard events, with every finger; Chromium's own pinch zoom
+  applies unless the page turns it off (`touch-action`, or a viewport meta tag with `user-scalable=no`).
 - **Battery:** mostly static pages are kindest to it. Every change costs a WiFi transfer; changing once a minute
   is better than once a second.
 - **Examples:** the built-in apps in `server/apps/` are plain HTML, CSS and JavaScript.
@@ -181,19 +191,39 @@ are, e.g. "2 / 3 · Page title".
 - **Status:** the Tab5's address and the server command.
 - **Battery** (top right): charge level, whether it is charging, voltage and current, and a rough time to full
   or time left.
-- **Display and sound:** brightness, volume, and flip 180°. All are remembered.
+- **Display and sound:** brightness, volume, keyboard lights (left end: off), and flip 180°. All are remembered.
+  Until you first use the flip switch, the Tab5 starts flipped when the keyboard is fitted, since that is upright
+  in it; the switch shows which way is in use.
 
 **While the panel is open,** the PC connection pauses. After **Done**, the PC reconnects within 2 s and redraws the
 page.
+
+## Keyboard
+
+M5Stack's [Tab5 Keyboard](https://docs.m5stack.com/en/tab5/Tab5_Keyboard) plugs into the Tab5's Ext.Port1 (attach
+it with the Tab5 off: the pin header isn't made for plugging in while powered). The Tab5 finds it at start, or
+within 2 s while running; without one nothing changes.
+
+- **In a page:** letters, digits, symbols, Enter, Backspace, Tab, Esc, arrows and Ctrl/Alt shortcuts (Ctrl+A,
+  Ctrl+C, ...). A held key repeats.
+  - **Aa** gives capitals, and acts as Shift on keys that don't type: Aa+arrows selects text, Aa+Tab goes back.
+  - **Sym** gives the second symbol printed on a key (`.` gives `,`), and the keys the keyboard lacks: Sym+← / →
+    Home / End, Sym+↑ / ↓ Page Up / Page Down, Sym+Backspace Delete.
+  - **Alt+← / →** go back and forward.
+- **With a video:** Space, the arrows and 0–9 (see [Videos](#videos)).
+- **In the settings:** type the WiFi name and password; Enter connects, Tab switches field, Esc closes.
+- **The lights:** left: white while Aa is held, amber while Sym is. Right: green with a PC connected, dim blue with
+  WiFi but no PC, amber without WiFi, blinking red below 10 % battery. Set their brightness, or turn them off, in
+  the settings.
 
 ## How it works
 
 ```
 PC: server/server.py                                    Tab5: firmware/web_display
-  Chromium (1280x720, touch)                              TCP server, port 8765
+  Chromium (1280x720, touch)                              TCP server, port 8765 (+ 8766, lanes)
   screencast frame -> diff in 16x16 tiles   --- JPEG -->  hardware JPEG decode -> PPA rotate -> display
-           -> changed rectangles as JPEG                  touch down / move / up
-  touch events in the page                  <-- touch --
+           -> changed rectangles as JPEG                  touch (every finger), keys, swipes
+  touch / key events, tabs, back / forward  <-- events --
   Chromium's sound -> private sink -> parec --- PCM ---> jitter buffer -> speaker   (UDP, port 8765)
 ```
 
@@ -222,8 +252,10 @@ PC: server/server.py                                    Tab5: firmware/web_displ
   waits.
 - **Touch:** touches go back to the PC as touch events, every finger (up to 5), so pages pinch-zoom and scroll
   as on a phone.
-- **Keyboard:** with M5Stack's Tab5 Keyboard fitted, keys go to the PC as key presses (see the changelog for the
-  video and settings keys).
+- **Keyboard:** the keyboard's controller reports each key going down and up over I2C; the Tab5 applies the Sym
+  and Aa layers and sends USB HID key codes, which the server turns into browser key events (and repeats while
+  held). Edge and three-finger swipes are recognised on the Tab5 and sent as gestures; the server switches tabs
+  and moves through the history with them.
 - **WiFi power save** turns off for 10 s after a touch, while updates stream in and while sound plays, so replies
   arrive quickly. Otherwise it stays on. `--power-save off` keeps it off.
 
@@ -316,11 +348,14 @@ USB serial at 115200 baud:
 | `wifi <ssid> <password>` | join a network |
 | `panel` | open the settings |
 | `rot` | flip the screen 180° |
+| `rot auto` | forget the saved rotation: from the next start it follows the keyboard |
 | `beep` | play a test tone and print the speaker's state |
 | `forget` | erase all saved settings and restart |
-| `S` | statistics since the last `S`, including sound, battery, lanes and memory |
+| `S` | statistics since the last `S`, including sound, battery, keyboard, lanes and memory |
 | `wifiinfo` | the WiFi standard in use (WiFi 4 or 6), channel and signal |
 | `T <x> <y>`, `drag <x0> <y0> <x1> <y1> [ms]` | scripted touches, for testing without a finger |
+| `pinch <cx> <cy> <d0> <d1> [ms]`, `three <x0> <x1> <y> [ms]` | scripted two-finger pinch, three-finger swipe |
+| `kbr <reg>`, `kbw <reg> <value>` | read / write a keyboard register (hex) |
 | `unconfigured` | behave like a first start until the next reboot |
 | `F` | dump the frame buffer; `tools/shot.py out.png` saves it as a PNG |
 
@@ -344,6 +379,8 @@ USB serial at 115200 baud:
   only on a 2.4 GHz network that offers it with 20 MHz channels. Router settings for IoT networks such as "force
   WiFi 4" or 40 MHz channels make it fall back to WiFi 4, which carries noticeably less (measured: 4.1 against
   4.8 MB/s over three connections in a test).
+- **The keyboard does nothing:** the serial `S` output has a `keyboard |` line. "none" means the Tab5 doesn't
+  see it on Ext.Port1: reseat it (with the Tab5 off). Keys need server 1.3; an older server ignores them.
 - **Chromium not found:** run `.venv/bin/playwright install chromium`, or pass `--browser /path/to/chrome`.
 
 ## Licence

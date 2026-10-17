@@ -3,51 +3,60 @@
 Versions follow [semantic versioning](https://semver.org). The firmware prints its version at boot, in the serial
 `S` statistics and in its settings panel; the server prints it at start and with `--version`.
 
-## Unreleased
+## 1.3.0 - 2026-10-16
 
-- **Keyboard (firmware 1.3 with server 1.3):** M5Stack's Tab5 Keyboard, on Ext.Port1, types into the page:
-  letters, Enter, Backspace, Tab, Esc, arrows and Ctrl/Alt shortcuts. Aa gives capitals, and Shift on keys that
-  don't type (Aa+arrows selects text); it leaves symbol keys alone, so nothing types a character that isn't on the
-  key. Sym gives the second symbol printed on a key, and Home, End, Page Up, Page Down (Sym+arrows) and Delete
-  (Sym+Backspace). The server repeats a held key (after 0.5 s, 30 per second), as the keyboard doesn't. With a
-  video: Space pauses, the arrows seek 5 s (and on while held, x6 with Aa), 0–9 jump to 0–90 %. In the settings
-  panel it types the WiFi name and password (Enter connects, Tab switches field, Esc closes). It can be plugged in
-  while running (better with the Tab5 off: the header isn't made for it, and a dip can restart the Tab5).
-- **Keyboard lights:** the left one is white while Aa is held and amber while Sym is; the right one is green with
-  a PC connected, dim blue with WiFi but no PC, amber without WiFi, blinking red below 10 % battery. "Key lights"
-  in the settings sets their brightness (left end: off). Serial `kbr <reg>` / `kbw <reg> <value>` read and write
-  the keyboard's registers.
-- **Tabs and back/forward (firmware 1.3 with server 1.3):** a link that opens a new tab (target=_blank,
-  window.open) used to open it out of sight, so the tap seemed to do nothing; it is now shown at once. Swipe in from
-  the right / left edge for the next / previous tab, up from the bottom to close it (not the last one). Three
-  fingers swiped left / right go back / forward, as do Alt+arrows. A note at the top shows the tab and title for
-  1.5 s. The settings now open from the top edge only (any edge with older servers and with videos).
+Firmware and server. Video files, M5Stack's Tab5 Keyboard, multi-touch with pinch zoom, tabs with back and
+forward, the battery in the settings, and a faster stream. Older firmware and servers still work with these,
+with the features both have.
+
+**Videos**
+- **`--file clip.mp4` plays any video ffmpeg can decode,** in a loop and with sound (no PulseAudio needed). Tap to
+  pause, drag sideways to seek (across the screen is 2 minutes; on the bar, the position follows the finger). A bar
+  at the bottom shows the time, length and file name while paused or seeking and for 3 s after a touch. ffmpeg
+  decodes the picture and the sound; the server keeps the clock and feeds the frames through the usual tile
+  pipeline. The quality of moving frames adapts to the measured WiFi rate: detailed 720p footage plays at 26–29 fps
+  (it was 18–19 at a fixed quality 70), simple footage at 30. Playback pauses while the Tab5 is disconnected (e.g.
+  settings open).
+- **Videos in web pages (YouTube) adapt their quality** the same way: large moving areas go out at a quality between
+  35 and 85 that fits the measured WiFi rate, instead of a fixed 70. It is lowered only while the server actually
+  waits for the Tab5, so frames lost elsewhere don't cost picture quality.
+
+**Keyboard** (M5Stack's Tab5 Keyboard, on Ext.Port1)
+- **Types into the page:** letters, Enter, Backspace, Tab, Esc, arrows and Ctrl/Alt shortcuts. Aa gives capitals,
+  and Shift on keys that don't type (Aa+arrows selects text); it leaves symbol keys alone, so nothing types a
+  character that isn't on the key. Sym gives the second symbol printed on a key, and Home, End, Page Up, Page Down
+  (Sym+arrows) and Delete (Sym+Backspace). The server repeats a held key (after 0.5 s, 30 per second), as the
+  keyboard doesn't. Alt+arrows go back and forward.
+- **With a video:** Space pauses, the arrows seek 5 s (and on while held, x6 with Aa), 0–9 jump to 0–90 %.
+- **In the settings:** it types the WiFi name and password (Enter connects, Tab switches field, Esc closes).
+- **Lights:** the left one is white while Aa is held and amber while Sym is; the right one is green with a PC
+  connected, dim blue with WiFi but no PC, amber without WiFi, blinking red below 10 % battery. "Key lights" in the
+  settings sets their brightness (left end: off).
 - **Rotation follows the keyboard:** until the flip switch is first used, the Tab5 starts flipped when a keyboard
   is fitted (upright in the keyboard, as in M5Stack's examples) and normal without one. The switch shows the
-  rotation in use; toggling it saves the choice, which then always wins. Serial `rot auto` forgets a saved choice.
-- **Reconnects after a Tab5 restart on a still page:** with nothing to send, the server kept the dead connection
-  for ever. TCP keepalive now notices within a few seconds.
-- **Decode time in the stats:** for pages the per-second line again shows how long a frame takes to decode (it is
-  done in the background now, and read 0 ms).
-- **Multi-touch (firmware 1.3 with server 1.3):** every finger goes to the page, so pinch zoom and the browser's
-  own two-finger gestures work. Older servers and videos still get one finger. A second finger during an edge
-  touch means it's for the page, not the settings swipe.
-- **Videos:** `--file clip.mp4` plays any video ffmpeg can decode, in a loop and with sound (no PulseAudio needed).
-  Tap to pause, drag sideways to seek (across the screen is 2 minutes; on the bar, the position follows the
-  finger). A bar at the bottom shows the time, length and file name while paused or seeking and for 3 s after a
-  touch. ffmpeg decodes the picture and the sound; the server keeps the clock and feeds the frames through the
-  usual tile pipeline. The quality of moving frames adapts to the measured WiFi rate: detailed 720p footage plays
-  at 26–29 fps (it was 18–19 at a fixed quality 70), simple footage at 30. Playback pauses while the Tab5 is
-  disconnected (e.g. settings open).
-- **Chrome and Edge found on Windows and macOS:** the server looks in their usual install folders when no browser
-  is on the PATH, so `--browser` is rarely needed. Edge works like Chrome.
-- **Lanes (firmware 1.3 with server 1.3): the stream spread over two TCP connections.** One connection carries at
-  most about 3 MB/s to the Tab5, because its 64 KB receive window is fixed; two carried 4.4 MB/s in tests (WiFi 6).
-  Each lane is drained into PSRAM by its own task, so the network stack's internal RAM isn't filled while frames
-  decode. Four minutes of detailed video: 2.83 MB/s instead of 2.50, quality 49 instead of 41 at the same 27 fps,
-  no stall over 250 ms, and the same internal-RAM margin as one connection (three lanes halved it for 3 % more).
-  If a "shown" is 150 ms overdue the server sends one more update, so a packet lost at the end of a lane's burst
-  is resent at once. `--lanes 1` keeps a single connection; older firmware and servers use one as before.
+  rotation in use; toggling it saves the choice, which then always wins.
+- **Plugging in:** noticed within 2 s while running, but better done with the Tab5 off (the header isn't made for
+  it, and a dip can restart the Tab5). Without a keyboard nothing changes; looking for one costs 0.1 ms every 2 s.
+
+**Touch, tabs and history**
+- **Multi-touch:** every finger goes to the page, so pinch zoom and the browser's own two-finger gestures work.
+  Older servers and videos still get one finger.
+- **New tabs are shown:** a link that opens a new tab (target=_blank, window.open) used to open it out of sight, so
+  the tap seemed to do nothing; it is now shown at once.
+- **Gestures:** swipe in from the right / left edge for the next / previous tab, up from the bottom to close it
+  (not the last one). Three fingers swiped left / right go back / forward. A note at the top shows the tab and
+  title for 1.5 s.
+- **The settings now open from the top edge** (any edge with older servers and with videos). A second finger
+  during an edge touch means it's for the page, not a swipe.
+
+**Speed**
+- **Lanes: the stream spread over two TCP connections.** One connection carries at most about 3 MB/s to the Tab5,
+  because its 64 KB receive window is fixed; two carried 4.4 MB/s in tests (WiFi 6). Each lane is drained into
+  PSRAM by its own task, so the network stack's internal RAM isn't filled while frames decode. Four minutes of
+  detailed video: 2.83 MB/s instead of 2.50, quality 49 instead of 41 at the same 27 fps, no stall over 250 ms, and
+  the same internal-RAM margin as one connection (three lanes halved it for 3 % more). If a "shown" is 150 ms
+  overdue the server sends one more update, so a packet lost at the end of a lane's burst is resent at once.
+  `--lanes 1` keeps a single connection; older firmware and servers use one as before.
 - **Nudges (firmware):** with the stream on the lanes, a lost event from the Tab5 (a "shown" or a touch) waited for
   lwIP's retransmission timer, over a second. While the page is busy the Tab5 now sends a tiny event after each
   one, so a loss is resent at once.
@@ -56,23 +65,33 @@ Versions follow [semantic versioning](https://semver.org). The firmware prints i
   with Numba, 4.0 with both; the server's CPU on video dropped from 48 % of a core to 35 % and 27 %. It is also the
   exact conversion: Pillow's double rounding shifted colours by up to a level. The fastest installed encoder is
   used; `--encoder` picks one.
-- **Videos in web pages (YouTube) adapt their quality** like the video player: large moving areas go out at a
-  quality between 35 and 85 that fits the measured WiFi rate, instead of a fixed 70. It is lowered only while the
-  server actually waits for the Tab5, so frames lost elsewhere don't cost picture quality.
 - **Page frames are decoded in the background,** while the previous one is encoded and sent. A detailed frame takes
   20–40 ms to decode, and decoding only when needed held a video in a page to about 21 fps although Chromium painted
-  30. Together: 25–26 fps at quality 52–62 (was 21 fps at 70).
-- **Fix: the first page frame stalled ~0.4 s** while Numba compiled for read-only arrays; it is compiled at start.
-- **`wifiinfo` serial command:** shows whether the Tab5 uses WiFi 4 or WiFi 6. It does WiFi 6 only on a 2.4 GHz
-  network that offers it on 20 MHz channels; a router's "force WiFi 4" for IoT networks costs throughput.
-- **Statistics:** the serial `S` output includes lane and internal-memory figures.
-- **Fix (firmware): touches waited while updates kept coming.** The Tab5 handled every update already received
-  before reading the touch screen again, so with the link busy all the time (a video) a tap could reach the PC
-  seconds late. It now handles one update per pass of its main loop.
+  30. Together with the adaptive quality: 25–26 fps at quality 52–62 (was 21 fps at 70).
+
+**Settings and setup**
 - **Battery in the settings panel** (firmware): charge level, charging or not, voltage, current and a rough time
   to full or time left, at the top right. The level comes from the resting voltage (the reading corrected for the
   charge or load current), and a pack counts as present only after 8 s of steady readings, since the charger's
-  output swings between about 4 and 8 V with no pack fitted. The serial `S` statistics include the same line.
+  output swings between about 4 and 8 V with no pack fitted.
+- **Chrome and Edge found on Windows and macOS:** the server looks in their usual install folders when no browser
+  is on the PATH, so `--browser` is rarely needed. Edge works like Chrome.
+
+**Fixes**
+- **Touches waited while updates kept coming** (firmware). The Tab5 handled every update already received before
+  reading the touch screen again, so with the link busy all the time (a video) a tap could reach the PC seconds
+  late. It now handles one update per pass of its main loop.
+- **No reconnect after a Tab5 restart on a still page:** with nothing to send, the server kept the dead connection
+  for ever. TCP keepalive now notices within a few seconds.
+- **The first page frame stalled ~0.4 s** while Numba compiled for read-only arrays; it is compiled at start.
+
+**Diagnostics**
+- **Serial commands:** `wifiinfo` shows whether the Tab5 uses WiFi 4 or WiFi 6 (it does WiFi 6 only on a 2.4 GHz
+  network that offers it on 20 MHz channels; a router's "force WiFi 4" for IoT networks costs throughput).
+  `rot auto` forgets a saved rotation. `kbr` / `kbw` read and write the keyboard's registers. `pinch` and `three`
+  script two- and three-finger touches.
+- **`S` statistics** include the battery, the keyboard, lane and internal-memory figures.
+- **The server's per-second line** shows the background decode time for pages again.
 
 ## 1.2.2 - 2026-10-15
 
