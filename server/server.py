@@ -43,7 +43,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from playwright.async_api import async_playwright
 
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 
 W, H, TILE, PORT = 1280, 720, 16, 8765
 # Chromium's rasterisation jitters a few pixels by a few levels between frames. A tile counts as changed if some
@@ -550,7 +550,11 @@ class Mirror:
     async def tab_opened(self, page):
         self.tabs.append(page)
         page.on("close", self.tab_closed)
+        left = self.page
         await self.attach(page)
+        if not self.firmware or self.firmware < (1, 3, 0):
+            # no swipes to come back with (older firmware): as a link in the same tab, without piling up hidden tabs
+            await left.close()
         await self.show_tab()
 
     def tab_closed(self, page):

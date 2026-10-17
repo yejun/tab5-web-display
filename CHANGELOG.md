@@ -3,6 +3,14 @@
 Versions follow [semantic versioning](https://semver.org). The firmware prints its version at boot, in the serial
 `S` statistics and in its settings panel; the server prints it at start and with `--version`.
 
+## 1.3.1 - 2026-10-16
+
+Server only; use it with firmware 1.3.0.
+
+- **New tabs with older firmware:** firmware 1.2 has no swipes to switch tabs, so a link that opened a new tab
+  left no way back to the first one, and hidden tabs piled up. With firmware older than 1.3 the server now closes
+  the tab it leaves, so such a link behaves like a normal link.
+
 ## 1.3.0 - 2026-10-16
 
 Firmware and server. Video files, M5Stack's Tab5 Keyboard, multi-touch with pinch zoom, tabs with back and
