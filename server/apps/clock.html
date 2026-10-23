@@ -7,32 +7,37 @@
 <style>
   body { padding: 28px 32px; display: grid; grid-template-columns: 1fr 470px; gap: 20px; }
   #left { display: flex; flex-direction: column; padding: 34px 40px; }
-  #timebox { display: flex; align-items: flex-end; gap: 14px; }
-  #time { font-size: 210px; font-weight: 200; line-height: .9; letter-spacing: -6px; }
-  #side { display: flex; flex-direction: column; gap: 10px; padding-bottom: 20px; }
-  #sec { font-size: 56px; font-weight: 300; color: var(--accent); line-height: 1; }
-  #period { font-size: 44px; font-weight: 300; color: var(--dim); line-height: 1; }
-  #date { font-size: 38px; margin-top: 22px; }
-  #meta { font-size: 22px; color: var(--dim); margin-top: 8px; }
+  #timebox { display: flex; align-items: flex-end; gap: 18px; }
+  #time { font-size: 216px; font-weight: 150; line-height: .86; letter-spacing: -.055em; }
+  #side { display: flex; flex-direction: column; gap: 12px; padding-bottom: 14px; }
+  #sec { font-size: 54px; font-weight: 250; color: var(--accent); line-height: 1; letter-spacing: -.02em; }
+  #period { font-size: 40px; font-weight: 400; color: var(--dim); line-height: 1; }
+  #date { font-size: 36px; font-weight: 500; letter-spacing: -.01em; margin-top: 28px; }
+  #meta { font-size: 21px; color: var(--dim); margin-top: 8px; }
   #hint { font-size: 16px; color: var(--faint); margin-top: 6px; }
-  #zones { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: auto; }
-  .zone { background: var(--card2); border-radius: 18px; padding: 16px 20px; }
-  .zone b { display: block; font-size: 18px; font-weight: 500; color: var(--dim); }
-  .zone span { font-size: 34px; font-weight: 300; }
-  .zone i { font-style: normal; font-size: 17px; color: var(--faint); margin-left: 8px; }
+  #zones { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-top: auto; }
+  .zone { background: var(--glass2); border: 1px solid rgba(255, 255, 255, .07); border-radius: 20px; padding: 16px 20px; }
+  .zone b { display: block; font-size: 15px; font-weight: 600; color: var(--faint); text-transform: uppercase;
+            letter-spacing: .12em; }
+  .zone span { font-size: 36px; font-weight: 250; letter-spacing: -.02em; }
+  .zone span small { font-size: 17px; font-weight: 500; color: var(--dim); margin-left: 6px; letter-spacing: 0; }
+  .zone i { display: block; font-style: normal; font-size: 16px; color: var(--dim); }
 
   #cal { display: flex; flex-direction: column; }
   #cal .top { display: flex; align-items: center; justify-content: space-between; }
-  #month { font-size: 30px; font-weight: 500; margin: 26px 0 14px; display: flex; align-items: center; }
+  #month { font-size: 28px; font-weight: 600; letter-spacing: -.01em; margin: 24px 0 12px; display: flex; align-items: center; }
   #month span { flex: 1; }
-  #month button { width: 60px; height: 52px; font-size: 26px; margin-left: 10px; }
+  #month button { width: 52px; height: 52px; font-size: 26px; margin-left: 10px; display: grid; place-items: center; }
+  #month button svg { width: 22px; height: 22px; }
   #grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; text-align: center; }
-  #grid .h { font-size: 16px; color: var(--faint); font-weight: 600; padding-bottom: 6px; }
-  #grid .d { height: 58px; line-height: 58px; border-radius: 14px; font-size: 23px; }
-  #grid .o { color: var(--faint); }
+  #grid .h { font-size: 14px; color: var(--faint); font-weight: 600; letter-spacing: .1em; text-transform: uppercase;
+             padding-bottom: 6px; }
+  #grid .d { height: 56px; line-height: 56px; border-radius: 18px; font-size: 22px; font-weight: 450; }
+  #grid .o { color: rgba(226, 232, 244, .22); }
   #grid .w { color: var(--dim); }
-  #grid .t { background: var(--accent); color: var(--bg); font-weight: 600; }
-  #today { margin-top: auto; height: 56px; font-size: 20px; }
+  #grid .t { background: linear-gradient(145deg, #6ff0d4, #24a8a8); color: #052a24; font-weight: 700;
+             box-shadow: 0 8px 22px -6px rgba(60, 220, 190, .6); }
+  #today { margin-top: auto; height: 54px; font-size: 19px; }
 </style>
 </head>
 <body>
@@ -45,7 +50,7 @@
   </section>
   <section class="card" id="cal">
     <div class="top"><span class="label">Calendar</span><a class="home"></a></div>
-    <div id="month"><span></span><button id="prev">‹</button><button id="next">›</button></div>
+    <div id="month"><span></span><button id="prev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg></button><button id="next"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg></button></div>
     <div id="grid"></div>
     <button id="today">Back to this month</button>
   </section>
@@ -73,10 +78,18 @@
     $("meta").textContent = `Week ${weekNumber(d)} · Day ${doy}`;
     $("zones").innerHTML = zones.map(z => {
       const t = timeParts(d, { timeZone: z });
-      const day = d.toLocaleDateString([], { timeZone: z, weekday: "short" });
-      return `<div class="zone"><b>${z.split("/").pop().replace(/_/g, " ")}</b><span class="num">${t.hm}</span><i>${t.period} ${day}</i></div>`;
+      // which day it is there, and how far ahead or behind: "Tomorrow · +13h"
+      const ymd = tz => d.toLocaleDateString("en-CA", { timeZone: tz });
+      const there = ymd(z), here = ymd(undefined);
+      const day = there === here ? "Today" : there > here ? "Tomorrow" : "Yesterday";
+      const wall = tz => new Date(d.toLocaleString("en-US", { timeZone: tz }));
+      const mins = Math.round((wall(z) - wall(undefined)) / 900000) * 15;
+      const off = mins === 0 ? "" : ` · ${mins > 0 ? "+" : "−"}${Math.floor(Math.abs(mins) / 60)}h${Math.abs(mins) % 60 || ""}`;
+      return `<div class="zone"><b>${z.split("/").pop().replace(/_/g, " ")}</b>
+              <span class="num">${t.hm}<small>${t.period}</small></span><i>${day}${off}</i></div>`;
     }).join("");
     if (d.getDate() !== shownToday) { shownToday = d.getDate(); drawCal(); }
+    skyForHour(d.getHours());
   }
   let secTimer = null, shownToday = -1;
   function applySeconds() {

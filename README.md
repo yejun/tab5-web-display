@@ -2,21 +2,23 @@
 
 Turn an [M5Stack Tab5](https://docs.m5stack.com/en/core/Tab5) into a touch screen for web pages. A small Python
 server renders a page in headless Chromium on your PC, sends what changed to the Tab5 over WiFi, and passes your
-touches (and keys, with M5Stack's Tab5 Keyboard) back to the page. Several ready-made apps are included, and you can
-show any URL, local HTML file or video.
+touches back to the page, along with keys from M5Stack's Tab5 Keyboard or a USB keyboard, and a USB mouse.
+Several ready-made apps are included, and you can show any URL, local HTML file or video.
 
-Version 1.3.2 (firmware 1.3.2) · MIT licence
+Version 1.4.0 (firmware 1.4.0) · MIT licence
 
 ![Home launcher on the Tab5](docs/home.png)
 
 | | |
 |---|---|
-| ![Dashboard](docs/dashboard.png) | ![Chinese almanac](docs/almanac.png) |
-| **Dashboard**: time, weather, 24-hour chart, forecast, air quality, headlines | **老黄历 (Chinese almanac)**: lunar date, 宜忌, solar terms, auspicious hours |
-| ![Sticky notes](docs/notes.png) | ![Editing a note](docs/notes_edit.png) |
-| **Sticky notes**, kept between runs | ...with their own on-screen keyboard |
+| ![Dashboard](docs/dashboard.png) | ![Clock](docs/clock.png) |
+| **Dashboard**: time, weather, 24-hour chart, forecast, air quality, the sun's path, headlines | **Clock**: big clock, month calendar, world clocks |
+| ![Chinese almanac](docs/almanac.png) | ![Sticky notes](docs/notes.png) |
+| **老黄历 (Chinese almanac)**: lunar date, 宜忌, solar terms, auspicious hours | **Sticky notes**, kept between runs |
+| ![Editing a note](docs/notes_edit.png) | ![Settings panel](docs/settings.png) |
+| ...with their own on-screen keyboard | **Settings** on the Tab5: WiFi, brightness, volume, orientation |
 
-*All screenshots were read back from the Tab5's frame buffer.*
+*All screenshots were read back from the Tab5's frame buffer (WiFi network names blurred).*
 
 ## Features
 
@@ -27,6 +29,9 @@ Version 1.3.2 (firmware 1.3.2) · MIT licence
 - **Keyboard.** With [M5Stack's Tab5 Keyboard](https://docs.m5stack.com/en/tab5/Tab5_Keyboard) fitted, you type
   into the page; it also controls videos and types the WiFi password. Its two lights show the connection and the
   Sym / Aa keys.
+- **USB keyboard and mouse.** Plug them into the Tab5's USB-A port (a wireless receiver works too). The mouse
+  hovers, clicks, double-clicks and scrolls in the page, with the pointer drawn by the Tab5 itself, so it moves
+  without waiting for the PC.
 - **Fast and light on the Tab5.**
   - **Only the 16×16 tiles that changed are sent.** An idle page with a ticking clock costs about 1.4 KB a second.
   - **The Tab5 barely works.** Its hardware JPEG decoder does the drawing, large changes straight into the
@@ -38,7 +43,8 @@ Version 1.3.2 (firmware 1.3.2) · MIT licence
 - **Videos.** `--file clip.mp4` plays any video ffmpeg can decode, in a loop and with sound, at up to 30 fps.
   Tap to pause, drag sideways to seek. Videos in web pages (YouTube) play at up to about 26 fps.
 - **Built-in apps that need no API keys:** a home launcher, a dashboard, a clock with calendar, sticky notes, a
-  Chinese almanac (老黄历), and a touch demo with a motion test.
+  Chinese almanac (老黄历), and a touch demo with a motion test. They share one look: frosted-glass cards on a sky
+  whose colours follow the weather or the time of day.
 - **Setup on the device.** A settings panel opens on first start to pick a WiFi network with an on-screen keyboard.
   Later, swipe down from the top edge to change WiFi, brightness or orientation, or to check the battery.
 - **No firewall changes.** The Tab5 listens and the PC connects out to it.
@@ -179,8 +185,8 @@ screen and plays in a loop.
 ## Settings on the Tab5
 
 **Opening the panel:** swipe down from the top edge, or tap the screen when no page is shown. (With a video, or a
-server older than 1.3, any edge works.) The panel also opens by itself on first start, and whenever the saved
-network can't be joined.
+server older than 1.3, any edge works.) On a USB keyboard, Scroll Lock opens and closes it. The panel also opens by
+itself on first start, and whenever the saved network can't be joined.
 
 **Tabs and history (pages):** a link that opens a new tab shows it at once. Swipe in from the right edge for the
 next tab, from the left edge for the one before, and up from the bottom edge to close the tab. Three fingers
@@ -194,9 +200,11 @@ are, e.g. "2 / 3 · Page title".
 - **Status:** the Tab5's address and the server command.
 - **Battery** (top right): charge level, whether it is charging, voltage and current, and a rough time to full
   or time left.
-- **Display and sound:** brightness, volume, keyboard lights (left end: off), and flip 180°. All are remembered.
-  Until you first use the flip switch, the Tab5 starts flipped when the keyboard is fitted, since that is upright
-  in it; the switch shows which way is in use.
+- **Display and sound:** brightness, volume, keyboard lights (left end: off), flip 180°, and reverse scrolling
+  (a USB mouse's wheel turned around, as "natural" scrolling on a touchpad). All are remembered. Until you first
+  use the flip switch, the Tab5 starts flipped when the keyboard is fitted, since that is upright in it; the switch
+  shows which way is in use.
+- **With a USB mouse** the panel shows the pointer, and clicks work like taps.
 
 **While the panel is open,** the PC connection pauses. After **Done**, the PC reconnects within 2 s and redraws the
 page.
@@ -218,6 +226,26 @@ within 2 s while running; without one nothing changes.
 - **The lights:** left: white while Aa is held, amber while Sym is. Right: green with a PC connected, dim blue with
   WiFi but no PC, amber without WiFi, blinking red below 10 % battery. Set their brightness, or turn them off, in
   the settings.
+
+## USB keyboard and mouse
+
+Plug a keyboard, a mouse, or both (through a hub, or one wireless receiver for both) into the Tab5's USB-A port.
+The Tab5 powers the port from the start, which costs a little battery.
+
+- **Keyboard:** everything the Tab5 Keyboard does, plus F1–F12, Insert and the number pad. Caps Lock works and
+  lights up on the keyboard; Scroll Lock opens the settings. The server adds the browser shortcuts headless Chromium
+  lacks: **F5** or **Ctrl+R** reloads, **Ctrl+Tab** / **Ctrl+Shift+Tab** switch tabs, **Ctrl+W** closes one,
+  **Alt+← / →** go back and forward.
+- **Mouse:** with server 1.4, the page gets real mouse events: hover (links underline, tooltips appear), left,
+  right and middle click, double click, Ctrl/Shift/Alt-click and the wheel, horizontal too. The back and forward
+  side buttons move through the history. The wheel's direction can be reversed in the settings.
+- **The pointer** is an arrow the Tab5 draws itself, so it follows the mouse at once, without a round trip to the
+  PC. Page updates under it get the arrow blended in before they reach the screen, so it doesn't flicker over
+  animations or videos. It hides when you touch the screen.
+- **Videos, and servers older than 1.4:** the left button acts as a finger (tap to pause, drag to seek).
+- **Show-off detail:** the arrow is blended with the ESP32-P4's PIE SIMD instructions, 8 pixels per instruction in
+  a hardware loop: 7.7 µs instead of 86 µs in plain C (measured on a v1.x chip). The firmware checks it against the
+  C version at every start and uses C if they ever differ; the serial `simd` command repeats the check.
 
 ## How it works
 
@@ -363,9 +391,11 @@ USB serial at 115200 baud:
 | `rot auto` | forget the saved rotation: from the next start it follows the keyboard |
 | `beep` | play a test tone and print the speaker's state |
 | `forget` | erase all saved settings and restart |
-| `S` | statistics since the last `S`, including frame pacing, sound, battery, keyboard, lanes and memory |
+| `S` | statistics since the last `S`, including frame pacing, sound, battery, keyboard, USB devices, lanes and memory |
 | `wifiinfo` | the WiFi standard in use (WiFi 4 or 6), channel and signal |
 | `T <x> <y>`, `drag <x0> <y0> <x1> <y1> [ms]` | scripted touches, for testing without a finger |
+| `mouse <dx> <dy> [buttons] [wheel]` | a scripted USB mouse report (buttons: 1 left, 2 right, 4 middle) |
+| `simd` | check the PIE SIMD pointer blend against plain C, and time both |
 | `pinch <cx> <cy> <d0> <d1> [ms]`, `three <x0> <x1> <y> [ms]` | scripted two-finger pinch, three-finger swipe |
 | `kbr <reg>`, `kbw <reg> <value>` | read / write a keyboard register (hex) |
 | `unconfigured` | behave like a first start until the next reboot |
@@ -393,13 +423,18 @@ USB serial at 115200 baud:
   4.8 MB/s over three connections in a test).
 - **The keyboard does nothing:** the serial `S` output has a `keyboard |` line. "none" means the Tab5 doesn't
   see it on Ext.Port1: reseat it (with the Tab5 off). Keys need server 1.3; an older server ignores them.
+- **A USB keyboard or mouse does nothing:** the serial `S` output has a `usb |` line with the keyboards and mice
+  seen and their reports. Mouse clicks and the wheel reach the page only with server 1.4; with an older one the
+  left button acts as a finger.
 - **Chromium not found:** run `.venv/bin/playwright install chromium`, or pass `--browser /path/to/chrome`.
 
 ## Licence
 
 [MIT](LICENSE) © 2026 Yejun Yang
 
-The almanac includes these third-party components:
+The apps include these third-party components:
+- [Inter](https://github.com/rsms/inter) by Rasmus Andersson (SIL Open Font License 1.1): cut down to Latin, in
+  `server/apps/fonts/`, so the apps look the same on every PC.
 - [lunar-javascript](https://github.com/6tail/lunar-javascript) by 6tail (MIT): unmodified, in `server/apps/vendor/`.
 - [LXGW WenKai](https://github.com/lxgw/LxgwWenKai) and [Ma Shan Zheng](https://github.com/google/fonts/tree/main/ofl/mashanzheng)
   (SIL Open Font License 1.1): cut down to the characters the almanac uses, in `server/apps/fonts/`. Because they

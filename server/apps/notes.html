@@ -5,49 +5,59 @@
 <title>Tab5 notes</title>
 <link rel="stylesheet" href="common.css">
 <style>
-  body { padding: 28px 32px; display: flex; flex-direction: column; gap: 18px; }
-  header { display: flex; align-items: center; gap: 18px; }
-  header h1 { font-size: 32px; font-weight: 600; }
-  header .dim { font-size: 20px; }
+  body { padding: 28px 32px; display: flex; flex-direction: column; gap: 20px; }
+  header { display: flex; align-items: center; gap: 18px; height: 52px; }
+  header h1 { font-size: 34px; font-weight: 650; letter-spacing: -.015em; }
+  header .dim { font-size: 19px; padding: 4px 12px; border-radius: 999px; background: var(--glass2); }
   header .sp { flex: 1; }
-  #add { height: 52px; padding: 0 22px; font-size: 20px; background: var(--accent-soft); }
-  #board { flex: 1; display: grid; grid-template-columns: repeat(4, 1fr); grid-template-rows: repeat(3, 1fr); gap: 16px; }
-  .note { border-radius: 18px; padding: 16px 18px; color: #15181f; display: flex; flex-direction: column;
-          overflow: hidden; box-shadow: 0 6px 16px rgba(0, 0, 0, .25); }
+  #add { height: 48px; padding: 0 22px; font-size: 19px; }
+  #board { flex: 1; display: grid; grid-template-columns: repeat(4, 1fr); grid-template-rows: repeat(3, 1fr); gap: 18px; }
+  /* paper: the colour, a light sheen at the top, a soft shadow */
+  .note { border-radius: 20px; padding: 18px 20px; color: #1a1d24; display: flex; flex-direction: column; overflow: hidden;
+          background-image: linear-gradient(180deg, rgba(255, 255, 255, .28), rgba(255, 255, 255, 0) 45%);
+          box-shadow: inset 0 1px 0 rgba(255, 255, 255, .5), 0 14px 28px -12px rgba(0, 0, 0, .6); }
+  .note:hover { box-shadow: inset 0 1px 0 rgba(255, 255, 255, .5), 0 0 0 3px rgba(255, 255, 255, .35), 0 14px 28px -12px rgba(0, 0, 0, .6); }
   .note:active { transform: scale(.97); }
-  .note p { font-size: 22px; line-height: 1.3; white-space: pre-wrap; overflow: hidden; flex: 1; word-break: break-word; }
-  .note small { font-size: 15px; opacity: .6; margin-top: 6px; }
-  .empty { grid-column: 1 / -1; grid-row: 1 / -1; display: grid; place-items: center; color: var(--faint); font-size: 26px; }
+  .note p { font-size: 22px; font-weight: 500; line-height: 1.32; white-space: pre-wrap; overflow: hidden; flex: 1; word-break: break-word; }
+  .note small { font-size: 14px; font-weight: 600; opacity: .55; margin-top: 6px; letter-spacing: .06em; text-transform: uppercase; }
+  .empty { grid-column: 1 / -1; grid-row: 1 / -1; display: flex; flex-direction: column; align-items: center;
+           justify-content: center; gap: 18px; color: var(--dim); font-size: 24px; }
+  .empty svg { width: 84px; height: 84px; opacity: .8; }
 
   /* editor */
-  #ed { position: fixed; inset: 0; background: rgba(0, 0, 0, .72); display: none; }
+  #ed { position: fixed; inset: 0; background: rgba(4, 6, 12, .55); backdrop-filter: blur(14px); display: none; }
   #ed.open { display: block; }
-  #paper { position: absolute; left: 160px; top: 22px; width: 960px; height: 360px; border-radius: 22px; padding: 18px 22px;
-           display: flex; flex-direction: column; gap: 12px; color: #15181f; }
-  #text { flex: 1; resize: none; border: 0; outline: 0; background: transparent; font-family: inherit; font-size: 28px; line-height: 1.35;
-          color: inherit; user-select: text; }
+  #paper { position: absolute; left: 160px; top: 22px; width: 960px; height: 360px; border-radius: 24px; padding: 20px 24px;
+           display: flex; flex-direction: column; gap: 12px; color: #1a1d24;
+           background-image: linear-gradient(180deg, rgba(255, 255, 255, .28), rgba(255, 255, 255, 0) 45%);
+           box-shadow: inset 0 1px 0 rgba(255, 255, 255, .5), 0 24px 50px -16px rgba(0, 0, 0, .7); }
+  #text { flex: 1; resize: none; border: 0; outline: 0; background: transparent; font-family: inherit; font-size: 28px;
+          font-weight: 500; line-height: 1.35; color: inherit; user-select: text; }
   #tools { display: flex; align-items: center; gap: 12px; }
-  .sw { width: 44px; height: 44px; border-radius: 50%; border: 3px solid rgba(0, 0, 0, .15); }
-  .sw.on { border-color: #15181f; }
+  .sw { width: 42px; height: 42px; border-radius: 50%; border: 3px solid rgba(0, 0, 0, .12);
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, .5); }
+  .sw.on { border-color: #1a1d24; }
   #tools .sp { flex: 1; }
-  #tools button { height: 50px; padding: 0 20px; font-size: 20px; }
-  #del { background: transparent; color: #15181f; border-color: rgba(0, 0, 0, .3); }
-  #done { background: #15181f; color: var(--ink); }
+  #tools button { height: 50px; padding: 0 24px; font-size: 19px; }
+  #del { background: transparent; color: #1a1d24; border-color: rgba(0, 0, 0, .25); }
+  #done { background: #1a1d24; color: #fff; border-color: transparent; }
 
   /* on-screen keyboard (the page runs in Chromium on the PC, so it brings its own) */
-  #kb { position: absolute; left: 0; right: 0; bottom: 0; height: 306px; background: #0c0f15; padding: 10px;
+  #kb { position: absolute; left: 0; right: 0; bottom: 0; height: 306px; padding: 10px;
+        background: var(--grain), rgba(12, 15, 24, .82); border-top: 1px solid var(--edge);
         display: grid; grid-template-rows: repeat(4, 1fr); gap: 8px; }
   .row { display: flex; gap: 8px; }
-  .k { flex: 1; display: grid; place-items: center; background: var(--card2); border-radius: 12px; font-size: 28px; }
+  .k { flex: 1; display: grid; place-items: center; background: rgba(255, 255, 255, .09); border-radius: 14px;
+       font-size: 28px; box-shadow: inset 0 1px 0 rgba(255, 255, 255, .08); }
   .k:active, .k.down { background: var(--accent); color: var(--bg); }
-  .k.fn { background: var(--line); font-size: 22px; }
+  .k.fn { background: rgba(255, 255, 255, .045); font-size: 22px; }
   .k.w15 { flex: 1.5; } .k.w2 { flex: 2; } .k.w5 { flex: 5.5; }
   .k.lit { background: var(--accent-soft); }
 </style>
 </head>
 <body>
   <header><h1>Sticky notes</h1><span class="dim" id="count"></span><span class="sp"></span>
-    <button id="add">+ New note</button><a class="home"></a></header>
+    <button id="add" class="primary">+ New note</button><a class="home"></a></header>
   <main id="board"></main>
 
   <div id="ed">
@@ -75,7 +85,9 @@
     $("board").innerHTML = notes.length ? notes.map((n, i) =>
       `<div class="note" data-i="${i}" style="background:${COLORS[n.color]}"><p>${esc(n.text) || "<i style='opacity:.5'>Empty note</i>"}</p>
        <small>${new Date(n.t).toLocaleDateString([], { month: "short", day: "numeric" })}</small></div>`).join("")
-      : `<div class="empty">No notes yet. Tap “+ New note” to write one.</div>`;
+      : `<div class="empty"><svg viewBox="0 0 40 40" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+           stroke-linejoin="round"><path d="M9 7h22v16l-9 10H9z"/><path d="M22 33V23h9M14 14h12M14 20h6"/></svg>
+           No notes yet. Tap “+ New note” to write one.</div>`;
     document.querySelectorAll(".note").forEach(el => el.onclick = () => edit(+el.dataset.i));
   }
 

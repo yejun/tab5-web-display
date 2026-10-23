@@ -5,71 +5,117 @@
 <title>Tab5 home</title>
 <link rel="stylesheet" href="common.css">
 <style>
-  body { padding: 56px 64px; display: flex; flex-direction: column; gap: 36px; }
-  header { display: flex; align-items: baseline; gap: 24px; }
-  #time { font-size: 64px; font-weight: 300; line-height: 1; }
-  #date { font-size: 26px; color: var(--dim); }
-  #hello { margin-left: auto; font-size: 24px; color: var(--dim); }
-  main { display: grid; grid-template-columns: repeat(3, 1fr); grid-auto-rows: 228px; gap: 24px; flex: 1; }
-  a.tile { display: flex; flex-direction: column; justify-content: flex-end; gap: 6px; padding: 26px 28px;
-           border-radius: 26px; background: var(--card); border: 1px solid var(--line); color: var(--ink);
-           text-decoration: none; position: relative; overflow: hidden; }
-  a.tile:active { background: var(--card2); border-color: var(--c); }
-  a.tile b { font-size: 32px; font-weight: 600; }
-  a.tile span { font-size: 19px; color: var(--dim); }
-  a.tile svg { position: absolute; top: 24px; left: 26px; width: 64px; height: 64px; }
-  .own { display: flex; flex-direction: column; justify-content: center; gap: 10px; padding: 26px 28px;
-         border-radius: 26px; border: 1px dashed var(--line); }
-  .own b { font-size: 26px; font-weight: 600; color: var(--dim); }
-  .own span { font-size: 18px; color: var(--faint); line-height: 1.6; }
-  .own code { font: 17px "DejaVu Sans Mono", monospace; color: var(--dim); }
+  body { padding: 48px 56px; display: flex; flex-direction: column; gap: 34px; }
+  header { display: flex; align-items: center; gap: 28px; height: 100px; }
+  #time { font-size: 96px; font-weight: 200; line-height: 1; letter-spacing: -.045em; display: flex; align-items: baseline; }
+  #time small { font-size: 24px; font-weight: 500; letter-spacing: .02em; margin-left: 12px; color: var(--dim); }
+  #greet { display: flex; flex-direction: column; gap: 4px; padding-left: 28px; border-left: 1px solid var(--line); }
+  #hello { font-size: 30px; font-weight: 600; letter-spacing: -.01em; }
+  #date { font-size: 20px; color: var(--dim); }
+  /* the weather now, from the dashboard's source; it opens the dashboard */
+  #wx { margin-left: auto; display: none; align-items: center; gap: 14px; height: 84px; padding: 0 26px 0 14px;
+        border-radius: 42px; text-decoration: none; color: var(--ink); }
+  #wx.on { display: flex; }
+  #wx:hover { background: var(--grain), rgba(255, 255, 255, .07); }
+  #wx b { font-size: 40px; font-weight: 300; letter-spacing: -.03em; }
+  #wx span { display: flex; flex-direction: column; font-size: 17px; color: var(--dim); line-height: 1.35; }
+  #wx span i { font-style: normal; color: var(--ink); font-weight: 600; font-size: 18px; }
+
+  main { display: grid; grid-template-columns: repeat(3, 1fr); grid-auto-rows: 1fr; gap: 22px; flex: 1; }
+  a.tile { position: relative; overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end;
+           gap: 6px; padding: 26px 28px; border-radius: 28px; color: var(--ink); text-decoration: none; }
+  a.tile::before { content: ""; position: absolute; right: -90px; top: -110px; width: 300px; height: 300px; z-index: -1;
+                   border-radius: 50%; background: radial-gradient(closest-side, var(--c), transparent); opacity: .28; }
+  a.tile:hover { background: var(--grain), rgba(255, 255, 255, .065); border-color: rgba(255, 255, 255, .18); }
+  a.tile:active { transform: scale(.98); }
+  a.tile b { font-size: 30px; font-weight: 650; letter-spacing: -.01em; }
+  a.tile span { font-size: 18px; color: var(--dim); }
+  a.tile .go { position: absolute; top: 28px; right: 26px; width: 22px; height: 22px; color: var(--faint); }
+  /* app icons: a glyph on a squircle in the app's colours */
+  .ic { position: absolute; top: 26px; left: 28px; width: 68px; height: 68px; border-radius: 20px;
+        display: grid; place-items: center; background: linear-gradient(145deg, var(--c), var(--c2));
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, .35), 0 10px 24px -8px var(--c2); }
+  .ic svg { width: 38px; height: 38px; }
+  .own { display: flex; flex-direction: column; justify-content: center; gap: 12px; padding: 26px 28px;
+         border-radius: 28px; border: 1.5px dashed rgba(255, 255, 255, .16); }
+  .own b { font-size: 24px; font-weight: 600; color: var(--dim); }
+  .own span { font-size: 17px; color: var(--faint); line-height: 1.7; }
+  .own code { font: 16px "DejaVu Sans Mono", monospace; color: var(--dim); background: var(--glass2);
+              padding: 3px 9px; border-radius: 8px; }
   /* the almanac tile uses the almanac's bundled fonts, so it needs no Chinese font on the PC */
   @font-face { font-family: "Almanac Kai"; src: url("fonts/lxgw-wenkai-almanac.woff2") format("woff2"); }
   @font-face { font-family: "Almanac Brush"; src: url("fonts/ma-shan-zheng-almanac.woff2") format("woff2"); }
-  a.tile b.zh { font-family: "Almanac Brush", "Almanac Kai", serif; font-weight: 400; font-size: 40px; color: #e9c27a; }
+  a.tile b.zh { font-family: "Almanac Brush", "Almanac Kai", serif; font-weight: 400; font-size: 40px; color: #f0cd85;
+                line-height: 1.1; }
   a.tile span.zh { font-family: "Almanac Kai", sans-serif; }
-  a.tile::after { content: ""; position: absolute; right: -60px; top: -60px; width: 200px; height: 200px;
-                  border-radius: 50%; background: var(--c); opacity: .10; }
 </style>
 </head>
 <body>
-  <header><div id="time" class="num"></div><div id="date"></div><div id="hello"></div></header>
+  <header>
+    <div id="time" class="num"></div>
+    <div id="greet"><div id="hello"></div><div id="date"></div></div>
+    <a id="wx" class="card" href="dashboard.html"><div id="wx-icon"></div><b id="wx-t" class="num"></b>
+      <span><i id="wx-text"></i><em id="wx-place" style="font-style:normal"></em></span></a>
+  </header>
   <main>
-    <a class="tile" href="dashboard.html" style="--c: var(--sky)">
-      <svg viewBox="0 0 64 64" fill="none" stroke="var(--sky)" stroke-width="4" stroke-linecap="round">
-        <rect x="6" y="10" width="52" height="44" rx="8"/><path d="M16 42l10-12 8 8 14-16"/></svg>
+    <a class="tile card" href="dashboard.html" style="--c: #5aa9ff; --c2: #5b4dff">
+      <div class="ic"><svg viewBox="0 0 40 40" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M7 29l8-9 6 5 11-13"/><circle cx="32" cy="12" r="2.5" fill="#fff" stroke="none"/></svg></div>
       <b>Dashboard</b><span>Time, weather, air quality, headlines</span></a>
-    <a class="tile" href="clock.html" style="--c: var(--accent)">
-      <svg viewBox="0 0 64 64" fill="none" stroke="var(--accent)" stroke-width="4" stroke-linecap="round">
-        <circle cx="32" cy="32" r="25"/><path d="M32 17v15l10 7"/></svg>
+    <a class="tile card" href="clock.html" style="--c: #45e3c4; --c2: #1688a8">
+      <div class="ic"><svg viewBox="0 0 40 40" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round">
+        <circle cx="20" cy="20" r="14"/><path d="M20 12v8l6 4"/></svg></div>
       <b>Clock</b><span>Big clock, calendar, world time</span></a>
-    <a class="tile" href="notes.html" style="--c: var(--sun)">
-      <svg viewBox="0 0 64 64" fill="none" stroke="var(--sun)" stroke-width="4" stroke-linejoin="round">
-        <path d="M10 8h44v32L38 56H10z"/><path d="M38 56V40h16"/><path d="M20 22h24M20 32h14" stroke-linecap="round"/></svg>
+    <a class="tile card" href="notes.html" style="--c: #ffd45c; --c2: #ff8a3c">
+      <div class="ic"><svg viewBox="0 0 40 40" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M9 7h22v16l-9 10H9z"/><path d="M22 33V23h9M14 14h12M14 20h6"/></svg></div>
       <b>Sticky notes</b><span>Quick notes, kept between runs</span></a>
-    <a class="tile" href="almanac.html" style="--c: #e8695f">
-      <svg viewBox="0 0 64 64" fill="none" stroke="#e8695f" stroke-width="4" stroke-linejoin="round">
-        <rect x="10" y="12" width="44" height="44" rx="6"/><path d="M10 24h44M22 6v12M42 6v12"/>
-        <text x="32" y="48" fill="#e9c27a" stroke="none" font-size="20" font-weight="700" text-anchor="middle"
-              font-family="Almanac Brush, Almanac Kai, serif">历</text></svg>
+    <a class="tile card" href="almanac.html" style="--c: #ff6f5f; --c2: #b8233a">
+      <div class="ic"><svg viewBox="0 0 40 40"><text x="20" y="33" fill="#ffe0a0" font-size="38" text-anchor="middle"
+        font-family="Almanac Brush, Almanac Kai, serif">历</text></svg></div>
       <b class="zh" lang="zh-CN">老黄历</b><span class="zh" lang="zh-CN">农历 · 宜忌 · 节气 · 吉时</span></a>
-    <a class="tile" href="demo.html" style="--c: var(--rose)">
-      <svg viewBox="0 0 64 64" fill="none" stroke="var(--rose)" stroke-width="4" stroke-linecap="round">
-        <rect x="8" y="14" width="48" height="36" rx="18"/><circle cx="40" cy="32" r="10" fill="var(--rose)"/></svg>
+    <a class="tile card" href="demo.html" style="--c: #ff8fb0; --c2: #9b5cff">
+      <div class="ic"><svg viewBox="0 0 40 40" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round">
+        <rect x="6" y="12" width="28" height="16" rx="8"/><circle cx="26" cy="20" r="4.5" fill="#fff" stroke="none"/></svg></div>
       <b>Touch &amp; motion</b><span>Touch demo and animation test</span></a>
-    <div class="tile own">
+    <div class="own">
       <b>Your own page</b>
       <span>On the PC:<br><code>server.py --url https://…</code><br><code>server.py --file page.html</code></span></div>
   </main>
 <script src="common.js"></script>
 <script>
+  // a small arrow in each tile's corner
+  document.querySelectorAll("a.tile").forEach(a => a.insertAdjacentHTML("beforeend",
+    `<svg class="go" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"
+          stroke-linejoin="round"><path d="M7 17 17 7M9 7h8v8"/></svg>`));
+
+  let haveWeather = false;
   everyMinute(() => {
-    const d = new Date();
-    $("time").textContent = fmtTime(d);
+    const d = new Date(), t = timeParts(d);
+    $("time").innerHTML = `${t.hm}<small>${t.period}</small>`;
     $("date").textContent = d.toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" });
     const h = d.getHours();
     $("hello").textContent = h < 5 ? "Good night" : h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening";
+    if (!haveWeather) skyForHour(h);
   });
+
+  // the weather now: shown when it can be had, and the sky follows it
+  async function weather() {
+    const p = await place();
+    const u = p.imperial ? "&temperature_unit=fahrenheit" : "";
+    const w = await getJSON(`https://api.open-meteo.com/v1/forecast?latitude=${p.lat}&longitude=${p.lon}&timezone=auto` +
+                            "&current=temperature_2m,weather_code,is_day" + u);
+    const c = w.current, [text, kind] = weatherInfo(c.weather_code);
+    $("wx-icon").innerHTML = weatherIcon(kind, c.is_day, 60);
+    $("wx-t").textContent = Math.round(c.temperature_2m) + "°";
+    $("wx-text").textContent = text;
+    $("wx-place").textContent = p.name;
+    $("wx").classList.add("on");
+    skyForWeather(kind, c.is_day);
+    haveWeather = true;
+  }
+  const run = () => weather().then(() => setTimeout(run, 15 * 60000)).catch(e => { console.error(e); setTimeout(run, 60000); });
+  run();
 </script>
 </body>
 </html>

@@ -5,140 +5,271 @@
 <title>Tab5 dashboard</title>
 <link rel="stylesheet" href="common.css">
 <style>
-  body { padding: 28px 32px; display: grid; gap: 20px; grid-template: "now chart" 248px "now week" 140px "now news" 1fr / 400px 1fr; }
-  #now { grid-area: now; display: flex; flex-direction: column; }
-  #time { font-size: 100px; font-weight: 300; line-height: 1; letter-spacing: -2px; display: flex; align-items: baseline; }
-  #time small { font-size: 30px; letter-spacing: 0; margin-left: 12px; color: var(--dim); }
-  #date { font-size: 24px; color: var(--dim); margin-top: 8px; }
-  #place { font-size: 20px; color: var(--faint); margin-top: 4px; }
-  #cur { display: flex; align-items: center; gap: 16px; margin-top: 26px; }
-  #cur-t { font-size: 76px; font-weight: 300; line-height: 1; }
-  #cur-text { font-size: 24px; margin-top: 8px; }
-  .facts { display: grid; grid-template-columns: auto 1fr; gap: 8px 18px; margin-top: 22px; font-size: 20px; }
-  .facts span:nth-child(odd) { color: var(--dim); }
-  #aqi { display: inline-flex; align-items: center; gap: 10px; }
-  #aqi i { width: 14px; height: 14px; border-radius: 50%; display: inline-block; }
-  #updated { margin-top: auto; font-size: 16px; color: var(--faint); }
+  body { padding: 28px 32px; display: grid; gap: 20px;
+         grid-template: "now chart" 236px "now week" 172px "now news" 1fr / 400px 1fr; }
 
-  #chart { grid-area: chart; position: relative; }
-  #chart .top { display: flex; align-items: center; justify-content: space-between; }
-  #hours { position: absolute; left: 24px; top: 66px; }
-  #week { grid-area: week; display: grid; grid-template-columns: repeat(6, 1fr); padding: 10px 10px; }
-  .day { display: flex; flex-direction: column; align-items: center; gap: 2px; font-size: 20px; }
-  .day b { font-weight: 500; color: var(--dim); font-size: 18px; }
-  .day .hi { font-weight: 500; }
-  .day .lo { color: var(--dim); }
-  #news { grid-area: news; overflow: hidden; }
-  #news ol { list-style: none; padding: 0; margin-top: 10px; }
-  #news li { display: flex; gap: 14px; align-items: baseline; padding: 6px 0; border-bottom: 1px solid var(--line);
-             font-size: 20px; white-space: nowrap; }
-  #news li:last-child { border: 0; }
-  #news .t { overflow: hidden; text-overflow: ellipsis; flex: 1; }
-  #news .m { color: var(--faint); font-size: 16px; }
-  #news .n { color: var(--accent); font-size: 16px; width: 18px; }
+  /* now */
+  #now { grid-area: now; padding: 24px 26px; display: flex; flex-direction: column; }
+  #place { display: flex; align-items: center; gap: 8px; font-size: 18px; font-weight: 500; color: var(--dim); height: 24px; }
+  #place svg { width: 18px; height: 18px; }
+  #time { font-size: 104px; font-weight: 200; line-height: 1; letter-spacing: -.045em; margin-top: 12px;
+          display: flex; align-items: baseline; }
+  #time small { font-size: 26px; font-weight: 500; letter-spacing: .02em; margin-left: 14px; color: var(--dim); }
+  #date { font-size: 21px; font-weight: 500; color: var(--dim); margin-top: 8px; }
+  #cur { display: flex; align-items: center; gap: 14px; margin-top: 30px; height: 108px; }
+  #cur-icon { width: 108px; height: 108px; flex: none; }
+  #cur-t { font-size: 80px; font-weight: 200; line-height: .9; letter-spacing: -.04em; }
+  #cur-text { font-size: 21px; font-weight: 600; margin-top: 8px; }
+  #cur-hilo { font-size: 17px; color: var(--dim); margin-top: 3px; }
+  .facts { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 24px; }
+  .fact { background: var(--glass); border: 1px solid rgba(255, 255, 255, .06); border-radius: 18px; padding: 11px 14px;
+          height: 70px; display: flex; flex-direction: column; justify-content: space-between; }
+  .fact .label { font-size: 13px; letter-spacing: .12em; }
+  .fact b { font-size: 23px; font-weight: 500; display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+  .fact b small { font-size: 15px; font-weight: 500; color: var(--dim); margin-left: -2px; }
+  #aqi i { width: 11px; height: 11px; border-radius: 50%; flex: none; box-shadow: 0 0 10px currentColor; }
+  #sunbox { margin-top: auto; position: relative; height: 122px; }
+  #sunarc { position: absolute; left: -4px; top: 0; }
+  #sunbox .ends { position: absolute; left: 0; right: 0; bottom: 0; display: flex; justify-content: space-between;
+                  font-size: 16px; color: var(--dim); }
+  #sunbox .ends b { font-weight: 600; color: var(--ink); }
+  #daylen { position: absolute; left: 0; right: 0; top: 60px; text-align: center; font-size: 15px; color: var(--faint); }
+
+  /* next 24 hours */
+  #chart { grid-area: chart; padding: 18px 22px 10px; position: relative; }
+  #chart .top { display: flex; align-items: center; gap: 14px; height: 40px; }
+  #updated { font-size: 15px; color: var(--faint); }
+  #chart a.home { margin-left: auto; height: 44px; border-radius: 22px; background: var(--glass2); border-color: var(--edge);
+                  font-size: 18px; font-weight: 500; padding: 0 18px 0 14px; }
+  #chart a.home svg { width: 20px; height: 20px; }
+  #hours { position: absolute; left: 10px; top: 58px; }
+
+  /* the week */
+  #week { grid-area: week; display: grid; grid-template-columns: repeat(6, 1fr); padding: 14px 10px; }
+  .day { display: flex; flex-direction: column; align-items: center; position: relative; }
+  .day + .day::before { content: ""; position: absolute; left: 0; top: 10px; bottom: 10px; width: 1px;
+                        background: linear-gradient(transparent, rgba(255, 255, 255, .09), transparent); }
+  .day b { font-size: 17px; font-weight: 600; color: var(--dim); letter-spacing: .04em; }
+  .day svg { margin: 4px 0 0; }
+  .day .pop { font-size: 14px; font-weight: 600; color: var(--rain); height: 18px; margin-top: -2px; }
+  .day .t { display: flex; gap: 10px; font-size: 19px; margin-top: 4px; }
+  .day .t span:first-child { font-weight: 600; }
+  .day .t span:last-child { color: var(--faint); }
+  .range { width: 92px; height: 6px; border-radius: 3px; background: rgba(255, 255, 255, .08); margin-top: 8px; position: relative; }
+  .range i { position: absolute; top: 0; bottom: 0; border-radius: 3px; }
+
+  /* headlines */
+  #news { grid-area: news; padding: 18px 24px 10px; overflow: hidden; }
+  #news .top { display: flex; align-items: center; gap: 10px; }
+  #news .top i { width: 22px; height: 22px; border-radius: 6px; background: #ff7a2f; color: #1a0d05; font: 700 15px/22px
+                 "Inter Tab5", sans-serif; text-align: center; font-style: normal; }
+  #news ol { list-style: none; padding: 0; margin-top: 6px; }
+  #news li { display: flex; gap: 16px; align-items: center; height: 42px; white-space: nowrap; }
+  #news li + li { border-top: 1px solid rgba(255, 255, 255, .06); }
+  #news .n { font-size: 17px; font-weight: 300; color: var(--faint); width: 24px; }
+  #news .t { overflow: hidden; text-overflow: ellipsis; flex: 1; font-size: 19px; font-weight: 500; }
+  #news .m { color: var(--faint); font-size: 15px; display: flex; gap: 12px; }
+  #news .m b { color: #ffa36b; font-weight: 600; }
 </style>
 </head>
 <body>
+  <svg width="0" height="0" style="position:absolute">
+    <defs><linearGradient id="sunArcG" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#ff9a3c"/>
+      <stop offset=".5" stop-color="#ffd76a"/><stop offset="1" stop-color="#ff9a3c"/></linearGradient></defs>
+  </svg>
+
   <section class="card" id="now">
+    <div id="place"></div>
     <div id="time" class="num">--:--</div>
     <div id="date"></div>
-    <div id="place"></div>
-    <div id="cur"><div id="cur-icon"></div><div><div id="cur-t" class="num">--°</div><div id="cur-text"></div></div></div>
+    <div id="cur"><div id="cur-icon"></div>
+      <div><div id="cur-t" class="num">--°</div><div id="cur-text"></div><div id="cur-hilo" class="num"></div></div></div>
     <div class="facts">
-      <span>Feels like</span><span id="feels" class="num">–</span>
-      <span>Humidity</span><span id="hum" class="num">–</span>
-      <span>Wind</span><span id="wind" class="num">–</span>
-      <span>Sun</span><span id="sun" class="num">–</span>
-      <span>Air quality</span><span id="aqi">–</span>
+      <div class="fact"><span class="label">Feels like</span><b id="feels" class="num">–</b></div>
+      <div class="fact"><span class="label">Humidity</span><b id="hum" class="num">–</b></div>
+      <div class="fact"><span class="label">Wind</span><b id="wind" class="num">–</b></div>
+      <div class="fact"><span class="label">Air quality</span><b id="aqi" class="num">–</b></div>
     </div>
-    <div id="updated"></div>
+    <div id="sunbox">
+      <svg id="sunarc" width="356" height="104"></svg>
+      <div id="daylen"></div>
+      <div class="ends num"><span id="rise"></span><span id="set"></span></div>
+    </div>
   </section>
   <section class="card" id="chart">
-    <div class="top"><span class="label">Next 24 hours</span><a class="home"></a></div>
-    <svg id="hours" width="760" height="170"></svg>
+    <div class="top"><span class="label">Next 24 hours</span><span id="updated"></span><a class="home"></a></div>
+    <svg id="hours" width="776" height="168"></svg>
   </section>
   <section class="card" id="week"></section>
-  <section class="card" id="news"><span class="label">Hacker News</span><ol id="hn"></ol></section>
+  <section class="card" id="news">
+    <div class="top"><i>Y</i><span class="label">Hacker News</span></div><ol id="hn"></ol></section>
 
 <script src="common.js"></script>
 <script>
   const deg = v => Math.round(v) + "°";
+  let imperial = false;
 
+  // A colour for a temperature (in °C): ice blue, teal, green, gold, orange, red
+  const STOPS = [[-10, [150, 170, 255]], [0, [125, 200, 255]], [10, [94, 228, 212]], [18, [160, 230, 130]],
+                 [24, [255, 214, 102]], [30, [255, 150, 70]], [38, [255, 95, 95]]];
+  function tempColor(v) {
+    const c = imperial ? (v - 32) * 5 / 9 : v;
+    if (c <= STOPS[0][0]) return `rgb(${STOPS[0][1]})`;
+    for (let i = 1; i < STOPS.length; i++) {
+      const [t1, a] = STOPS[i - 1], [t2, b] = STOPS[i];
+      if (c <= t2) { const f = (c - t1) / (t2 - t1); return `rgb(${a.map((x, k) => Math.round(x + (b[k] - x) * f))})`; }
+    }
+    return `rgb(${STOPS.at(-1)[1]})`;
+  }
+
+
+  let sunTimes = null;   // [sunrise, sunset, next sunrise] as Dates
   everyMinute(() => {
     const d = new Date();
     const t = timeParts(d);
     $("time").innerHTML = `${t.hm}<small>${t.period}</small>`;
     $("date").textContent = d.toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" });
+    if (sunTimes) drawSun();
   });
 
   async function weather() {
     const p = await place();
-    $("place").textContent = p.name;
+    imperial = p.imperial;
+    $("place").innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round">
+      <path d="M12 21s-7-6.2-7-11.5A7 7 0 0 1 19 9.5C19 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/></svg>${p.name}`;
     const u = p.imperial ? "&temperature_unit=fahrenheit&wind_speed_unit=mph" : "";
     const w = await getJSON(`https://api.open-meteo.com/v1/forecast?latitude=${p.lat}&longitude=${p.lon}&timezone=auto` +
-      "&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m,is_day" +
+      "&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m,wind_direction_10m,is_day" +
       "&hourly=temperature_2m,precipitation_probability,weather_code,is_day" +
-      "&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset&forecast_days=7" + u);
-    const c = w.current, [text, kind] = weatherInfo(c.weather_code);
-    $("cur-icon").innerHTML = weatherIcon(kind, c.is_day, 96);
+      "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,sunrise,sunset" +
+      "&forecast_days=7" + u);
+    const c = w.current, dl = w.daily, [text, kind] = weatherInfo(c.weather_code);
+    skyForWeather(kind, c.is_day);
+    $("cur-icon").innerHTML = weatherIcon(kind, c.is_day, 108);
     $("cur-t").textContent = deg(c.temperature_2m);
     $("cur-text").textContent = text;
+    $("cur-hilo").textContent = `H ${deg(dl.temperature_2m_max[0])}  ·  L ${deg(dl.temperature_2m_min[0])}`;
     $("feels").textContent = deg(c.apparent_temperature);
     $("hum").textContent = c.relative_humidity_2m + "%";
-    $("wind").textContent = Math.round(c.wind_speed_10m) + (p.imperial ? " mph" : " km/h");
-    const hm = s => fmtTime(new Date(s));   // times are local to the place; fine while it's our own time zone
-    $("sun").textContent = `↑ ${hm(w.daily.sunrise[0])}   ↓ ${hm(w.daily.sunset[0])}`;
+    const dir = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"][Math.round(c.wind_direction_10m / 45) % 8];
+    $("wind").innerHTML = `${Math.round(c.wind_speed_10m)}<small>${p.imperial ? "mph" : "km/h"} ${dir}</small>`;
+    // times are local to the place; fine while it's our own time zone
+    sunTimes = [new Date(dl.sunrise[0]), new Date(dl.sunset[0]), new Date(dl.sunrise[1])];
+    drawSun();
     drawHours(w);
-    $("week").innerHTML = w.daily.time.slice(1, 7).map((t, i) => {
-      const k = i + 1, [, dk] = weatherInfo(w.daily.weather_code[k]);
-      const name = new Date(t + "T12:00").toLocaleDateString([], { weekday: "short" });
-      return `<div class="day"><b>${name}</b>${weatherIcon(dk, true, 52)}
-              <span><span class="hi">${deg(w.daily.temperature_2m_max[k])}</span>
-              <span class="lo">${deg(w.daily.temperature_2m_min[k])}</span></span></div>`;
-    }).join("");
-    $("updated").textContent = "Weather updated " + fmtTime(new Date()) + " · Open-Meteo";
+    drawWeek(w);
+    $("updated").textContent = "Updated " + fmtTime(new Date()) + " · Open-Meteo";
   }
 
-  // 24 hours from now: temperature line, rain-chance bars, a label every 3 hours
+  // The sun's way across the sky today, and where it is now
+  function drawSun() {
+    const [rise, set, next] = sunTimes, now = new Date();
+    const W = 356, cx = W / 2, rx = 160, ry = 74, base = 88;
+    const f = Math.min(Math.max((now - rise) / (set - rise), 0), 1), up = now > rise && now < set;
+    const at = q => [cx - rx * Math.cos(Math.PI * q), base - ry * Math.sin(Math.PI * q)];
+    const [sx, sy] = at(f);
+    let s = `<line x1="0" y1="${base}" x2="${W}" y2="${base}" stroke="rgba(255,255,255,.14)" stroke-width="1.5"/>
+      <path d="M${cx - rx} ${base}A${rx} ${ry} 0 0 1 ${cx + rx} ${base}" fill="none" stroke="rgba(255,255,255,.16)"
+            stroke-width="2" stroke-dasharray="2 7" stroke-linecap="round"/>`;
+    if (up) s += `<path d="M${cx - rx} ${base}A${rx} ${ry} 0 0 1 ${sx.toFixed(1)} ${sy.toFixed(1)}" fill="none"
+                       stroke="url(#sunArcG)" stroke-width="3" stroke-linecap="round"/>`;
+    s += up ? `<circle cx="${sx}" cy="${sy}" r="22" fill="url(#glowG)"/><circle cx="${sx}" cy="${sy}" r="8" fill="url(#sunG)"/>`
+            : `<circle cx="${sx}" cy="${sy}" r="5" fill="none" stroke="rgba(255,255,255,.45)" stroke-width="2"/>`;
+    $("sunarc").innerHTML = s;
+    const span = ms => { const m = Math.round(ms / 60000); return `${Math.floor(m / 60)}h ${m % 60}m`; };
+    $("daylen").textContent = up ? `${span(set - now)} of daylight left`
+                            : now < rise ? `Sunrise in ${span(rise - now)}` : `Sunrise in ${span(next - now)}`;
+    $("rise").innerHTML = `Sunrise <b>${fmtTime(rise)}</b>`;
+    $("set").innerHTML = `Sunset <b>${fmtTime(set)}</b>`;
+  }
+
+  // 24 hours from now: a smooth temperature curve coloured by temperature, chance-of-rain bars, night shaded
   function drawHours(w) {
     const h = w.hourly, start = Math.max(0, h.time.findIndex(t => t.slice(0, 13) >= w.current.time.slice(0, 13)));
-    const n = 24, T = h.temperature_2m.slice(start, start + n), P = h.precipitation_probability.slice(start, start + n);
-    const W = 760, H = 170, top = 34, bot = 128, lo = Math.min(...T), hi = Math.max(...T), span = Math.max(hi - lo, 4);
-    const x = i => 14 + i * (W - 28) / (n - 1), y = v => bot - (v - lo) / span * (bot - top);
-    let s = `<defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="var(--accent)" stop-opacity=".35"/>
-             <stop offset="1" stop-color="var(--accent)" stop-opacity="0"/></linearGradient></defs>`;
-    P.forEach((p, i) => { if (p > 0) s += `<rect x="${x(i) - 9}" y="${bot + 12 - p * .4}" width="18" height="${p * .4}" rx="3"
-                                                 fill="var(--sky)" opacity=".55"/>`; });
-    const line = T.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)} ${y(v).toFixed(1)}`).join("");
-    s += `<path d="${line}L${x(n - 1)} ${bot}L${x(0)} ${bot}Z" fill="url(#g)"/>`;
-    s += `<path d="${line}" fill="none" stroke="var(--accent)" stroke-width="4" stroke-linejoin="round" stroke-linecap="round"/>`;
+    const n = 25, T = h.temperature_2m.slice(start, start + n), P = h.precipitation_probability.slice(start, start + n);
+    const D = h.is_day.slice(start, start + n);
+    const W = 776, H = 168, top = 30, bot = 112, lo = Math.min(...T), hi = Math.max(...T), span = Math.max(hi - lo, 4);
+    const x = i => 26 + i * (W - 52) / (n - 1), y = v => bot - (v - lo) / span * (bot - top);
+    const step = (W - 52) / (n - 1);
+    // temperature colours from the top of the chart (hi) to the bottom (lo)
+    const grad = [0, .25, .5, .75, 1].map(q => `<stop offset="${q}" stop-color="${tempColor(hi - q * (hi - lo))}"/>`).join("");
+    let s = `<defs><linearGradient id="tl" gradientUnits="userSpaceOnUse" x1="0" y1="${y(hi)}" x2="0" y2="${y(lo) + .01}">${grad}</linearGradient>
+      <linearGradient id="ta" gradientUnits="userSpaceOnUse" x1="0" y1="${top}" x2="0" y2="${bot + 24}">
+        <stop offset="0" stop-color="${tempColor(hi)}" stop-opacity=".30"/><stop offset="1" stop-color="${tempColor(lo)}" stop-opacity="0"/>
+      </linearGradient></defs>`;
+    // night: shaded bands with a little moon
+    for (let i = 0; i < n;) {
+      if (D[i]) { i++; continue; }
+      let j = i; while (j < n && !D[j]) j++;
+      const x0 = Math.max(x(i) - step / 2, 0), x1 = Math.min(x(j - 1) + step / 2, W);
+      s += `<rect x="${x0}" y="4" width="${x1 - x0}" height="${H - 34}" rx="10" fill="rgba(120,120,255,.07)"/>`;
+      if (x1 - x0 > 60) s += `<path transform="translate(${x0 + 10} 10)" d="M6 0a6 6 0 1 0 6 8a5 5 0 0 1 -6 -8z" fill="rgba(200,195,255,.5)"/>`;
+      i = j;
+    }
+    P.forEach((p, i) => {
+      if (p < 5) return;
+      const ph = p * .34;
+      s += `<rect x="${x(i) - 8}" y="${bot + 22 - ph}" width="16" height="${ph}" rx="4" fill="var(--rain)" opacity="${.18 + p / 250}"/>`;
+      if (p >= 30 && i % 3 === 0) s += `<text x="${x(i)}" y="${bot + 18 - ph}" fill="var(--rain)" font-size="13" font-weight="600"
+                                         text-anchor="middle">${p}%</text>`;
+    });
+    // Catmull-Rom through the hours, as cubic Béziers
+    const pts = T.map((v, i) => [x(i), y(v)]);
+    let line = `M${pts[0][0].toFixed(1)} ${pts[0][1].toFixed(1)}`;
+    for (let i = 0; i < n - 1; i++) {
+      const p0 = pts[Math.max(i - 1, 0)], p1 = pts[i], p2 = pts[i + 1], p3 = pts[Math.min(i + 2, n - 1)];
+      const c1 = [p1[0] + (p2[0] - p0[0]) / 6, p1[1] + (p2[1] - p0[1]) / 6], c2 = [p2[0] - (p3[0] - p1[0]) / 6, p2[1] - (p3[1] - p1[1]) / 6];
+      line += `C${c1[0].toFixed(1)} ${c1[1].toFixed(1)} ${c2[0].toFixed(1)} ${c2[1].toFixed(1)} ${p2[0].toFixed(1)} ${p2[1].toFixed(1)}`;
+    }
+    s += `<path d="${line}L${x(n - 1)} ${bot + 22}L${x(0)} ${bot + 22}Z" fill="url(#ta)"/>`;
+    s += `<path d="${line}" fill="none" stroke="url(#tl)" stroke-width="4" stroke-linejoin="round" stroke-linecap="round"/>`;
     for (let i = 0; i < n; i += 3) {
       const hr = new Date(h.time[start + i]);
-      s += `<text x="${x(i)}" y="${y(T[i]) - 12}" fill="var(--ink)" font-size="19" text-anchor="middle">${deg(T[i])}</text>`;
-      s += `<text x="${i ? x(i) : 2}" y="${H - 4}" fill="var(--dim)" font-size="17" text-anchor="${i ? "middle" : "start"}">${
-            i ? hr.toLocaleTimeString([], { hour: "numeric" }) : "Now"}</text>`;
+      if (i) s += `<circle cx="${x(i)}" cy="${y(T[i])}" r="3.5" fill="#0b0f1a" stroke="${tempColor(T[i])}" stroke-width="2"/>`;
+      s += `<text x="${x(i)}" y="${y(T[i]) - 12}" fill="var(--ink)" font-size="18" font-weight="600" text-anchor="middle">${deg(T[i])}</text>`;
+      s += `<text x="${x(i)}" y="${H - 4}" fill="${i ? "var(--faint)" : "var(--ink)"}" font-size="15" font-weight="${i ? 500 : 700}"
+              text-anchor="middle">${i ? hr.toLocaleTimeString([], { hour: "numeric" }) : "Now"}</text>`;
     }
+    s += `<circle cx="${x(0)}" cy="${y(T[0])}" r="13" fill="${tempColor(T[0])}" opacity=".22"/>
+          <circle cx="${x(0)}" cy="${y(T[0])}" r="6" fill="${tempColor(T[0])}" stroke="#fff" stroke-width="2"/>`;
     $("hours").innerHTML = s;
+  }
+
+  // Six days: icon, rain chance, and each day's span on the week's temperature scale
+  function drawWeek(w) {
+    const dl = w.daily, days = [1, 2, 3, 4, 5, 6];
+    const lo = Math.min(...days.map(k => dl.temperature_2m_min[k])), hi = Math.max(...days.map(k => dl.temperature_2m_max[k]));
+    const pos = v => (v - lo) / Math.max(hi - lo, 1) * 100;
+    $("week").innerHTML = days.map(k => {
+      const [, kind] = weatherInfo(dl.weather_code[k]), tmin = dl.temperature_2m_min[k], tmax = dl.temperature_2m_max[k];
+      const name = new Date(dl.time[k] + "T12:00").toLocaleDateString([], { weekday: "short" });
+      const pop = dl.precipitation_probability_max[k];
+      return `<div class="day"><b>${name}</b>${weatherIcon(kind, true, 54)}
+        <span class="pop">${pop >= 20 ? pop + "%" : ""}</span>
+        <span class="t num"><span>${deg(tmax)}</span><span>${deg(tmin)}</span></span>
+        <span class="range"><i style="left:${pos(tmin)}%;right:${100 - pos(tmax)}%;
+          background:linear-gradient(90deg,${tempColor(tmin)},${tempColor(tmax)})"></i></span></div>`;
+    }).join("");
   }
 
   async function air() {
     const p = await place();
     const a = await getJSON(`https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${p.lat}&longitude=${p.lon}&current=us_aqi`);
     const v = Math.round(a.current.us_aqi);
-    const [word, col] = v <= 50 ? ["Good", "#5ad08a"] : v <= 100 ? ["Moderate", "#f2cf6b"] : v <= 150 ? ["Unhealthy for some", "#f0a868"]
-                      : v <= 200 ? ["Unhealthy", "#ef6f6f"] : ["Very unhealthy", "#b49cf0"];
-    $("aqi").innerHTML = `<i style="background:${col}"></i>${v} · ${word}`;
+    const [word, col] = v <= 50 ? ["Good", "#5ee08f"] : v <= 100 ? ["Fair", "#ffd76a"] : v <= 150 ? ["Poor", "#ff9a3c"]
+                      : v <= 200 ? ["Unhealthy", "#ff6b6b"] : ["Very poor", "#c49cff"];
+    $("aqi").innerHTML = `<i style="background:${col};color:${col}"></i>${v}<small>${word}</small>`;
   }
 
   async function news() {
     const ids = (await getJSON("https://hacker-news.firebaseio.com/v0/topstories.json")).slice(0, 4);
     const items = await Promise.all(ids.map(id => getJSON(`https://hacker-news.firebaseio.com/v0/item/${id}.json`)));
+    const esc = s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
     $("hn").innerHTML = items.map((it, i) => {
       let host = "";
       try { host = new URL(it.url).hostname.replace(/^www\./, ""); } catch { host = "news.ycombinator.com"; }
-      const esc = s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
-      return `<li><span class="n">${i + 1}</span><span class="t">${esc(it.title)}</span>
-              <span class="m">${it.score} pts · ${esc(host)}</span></li>`;
+      return `<li><span class="n num">0${i + 1}</span><span class="t">${esc(it.title)}</span>
+              <span class="m num"><span><b>▲</b> ${it.score}</span><span>${esc(host)}</span></span></li>`;
     }).join("");
   }
 

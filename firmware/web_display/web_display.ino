@@ -6,7 +6,8 @@
 //             { "TAB5", u16 x, y, w, h, u32 len } (little endian) and `len` bytes of baseline JPEG; x, y, w and h
 //             are multiples of 16. The end marker is a header with w = h = len = 0.
 //             A header with magic "TCFG" instead is settings: x = WiFi power save (0 auto, 1 always off),
-//             y bits: 1 = send every finger (multi-touch), not only the first; 2 = send gestures (below).
+//             y bits: 1 = send every finger (multi-touch), not only the first; 2 = send gestures (below);
+//             4 = send mouse events (firmware 1.4.0; otherwise a USB mouse's left button acts as a finger).
 //             Magic "TPTS" (firmware 1.3.2, only on lanes) times the update that follows: x | y << 16 = when it is due on
 //             the PC's clock (ms, wrapping), w = how many ms before that the PC sent it (signed). See pacing below.
 //             Magic "TABS" is a strip: landscape columns x..x+w at full height (y = 0, h = 720), sent as a
@@ -24,7 +25,12 @@
 //             10 = gesture (only if the PC asked for them): x = 1 swipe in from the left edge, 2 from the right,
 //             3 from the bottom, 4 three fingers swiped right, 5 three fingers swiped left. The PC switches and
 //             closes browser tabs, and goes back and forward, with them.
-// Sound arrives separately as UDP, see audio.h.
+//             11 = mouse (firmware 1.4.0, only if the PC asked for them): x, y = the pointer; flags bits 0-4 = the
+//             buttons held (left, right, middle, back, forward), bits 5-7 = Ctrl, Shift, Alt held; z = the wheel's
+//             steps since the last event (low byte, int8, + = away from the user) and the horizontal wheel's
+//             (high byte, + = right). Sent when a button or wheel changes, and for moves at most every 16 ms.
+// Sound arrives separately as UDP, see audio.h. USB keyboards and mice on the USB-A port: usb_hid.h; the Tab5
+// draws the mouse pointer itself: pointer.h.
 //
 // Each rectangle is decoded by the P4's hardware JPEG engine to RGB565 and rotated into the panel's portrait
 // frame buffer by the PPA (both DMA, the CPU only waits).
@@ -35,7 +41,8 @@
 //
 // Serial commands: ip | wifi <ssid> <password> | wifiinfo | rot | rot auto | S (stats) | F (dump the frame buffer, see tools/shot.py)
 //                  | T <x> <y> (scripted tap) | drag <x0> <y0> <x1> <y1> [ms] | pinch <cx> <cy> <d0> <d1> [ms]
-//                  | three <x0> <x1> <y> [ms] (three-finger swipe)
+//                  | three <x0> <x1> <y> [ms] (three-finger swipe) | mouse <dx> <dy> [buttons] [wheel] (scripted mouse)
+//                  | simd (check and time the pointer's SIMD blend)
 //                  | panel (open the settings)
 //                  | beep (speaker check) | forget (erase saved settings and restart)
 #include <M5Unified.h>
@@ -50,7 +57,7 @@
 #include <esp_timer.h>
 #include <esp_wifi.h>
 
-static constexpr const char* FIRMWARE_VERSION = "1.3.2";
+static constexpr const char* FIRMWARE_VERSION = "1.4.0";
 static constexpr int SCR_W = 1280, SCR_H = 720;   // landscape, as the page is rendered
 static constexpr int FB_W = 720, FB_H = 1280;     // the panel's native portrait frame buffer
 static constexpr uint16_t PORT = 8765;
@@ -63,7 +70,7 @@ static constexpr int EDGE = 40, SWIPE_IN = 120;           // edge swipe: start w
 static constexpr int64_t SWIPE_MS = 700;
 static constexpr int SWIPE3 = 150;                    // three fingers moved this far sideways: back / forward
 
-enum : uint8_t { EV_DOWN = 1, EV_MOVE = 2, EV_UP = 3, EV_SHOWN = 5, EV_HELLO = 6, EV_LANES = 7, EV_NUDGE = 8, EV_KEY = 9, EV_GESTURE = 10 };
+enum : uint8_t { EV_DOWN = 1, EV_MOVE = 2, EV_UP = 3, EV_SHOWN = 5, EV_HELLO = 6, EV_LANES = 7, EV_NUDGE = 8, EV_KEY = 9, EV_GESTURE = 10, EV_MOUSE = 11 };
 enum : uint8_t { GEST_LEFT = 1, GEST_RIGHT = 2, GEST_BOTTOM = 3, GEST_THREE_RIGHT = 4, GEST_THREE_LEFT = 5 };
 enum : uint8_t { HELLO_SOUND = 1, HELLO_STRIPS = 2, HELLO_FLIPPED = 4 };   // hello flags
 
@@ -94,7 +101,9 @@ static bool g_wifi_sleep = true;
 static uint8_t g_power_mode = 0;          // from the PC: 0 = auto, 1 = power save always off
 static bool g_multitouch = false;         // from the PC: it takes every finger
 static bool g_gestures = false;           // from the PC: it takes edge and three-finger swipes (tabs, back)
+static bool g_mouse_pc = false;           // from the PC: it takes mouse events
 static uint8_t g_kled = 10;               // keyboard light brightness, 0 (off) to 100
+static bool g_scroll_rev = false;         // a USB mouse's wheel turned around ("natural" scrolling)
 
 enum WifiState { WIFI_NONE, WIFI_CONNECTING, WIFI_UP, WIFI_FAILED };
 static WifiState g_wifi = WIFI_NONE;
@@ -116,6 +125,7 @@ static Stats g_stats = {};
 static int64_t now_ms() { return esp_timer_get_time() / 1000; }
 static void panel_open();
 static void kbd_set_light(uint8_t level);
+static void ptr_erase();
 
 #include "audio.h"
 
@@ -129,6 +139,7 @@ static void fb_sync() {
 
 // Full-screen message (or, with banner, a bar along the bottom over the last page image).
 static void show_status(const char* line1, const char* line2, bool banner = false) {
+  ptr_erase();
   auto& d = M5.Display;
   const int y0 = banner ? SCR_H - 64 : 0;
   d.fillRect(0, y0, SCR_W, banner ? 64 : SCR_H, banner ? 0x3186 : 0x10A3);
@@ -207,6 +218,27 @@ static bool ppa_blit(const void* src, int x, int y, int w, int h) {
   return ppa_do_scale_rotate_mirror(g_ppa, &op) == ESP_OK;
 }
 
+// Copy whole frame buffer rows (already in the panel's orientation) into place.
+static bool ppa_copy_rows(const void* src, int row, int rows) {
+  ppa_srm_oper_config_t op = {};
+  op.in.buffer = src;
+  op.in.pic_w = op.in.block_w = FB_W;
+  op.in.pic_h = op.in.block_h = rows;
+  op.in.srm_cm = PPA_SRM_COLOR_MODE_RGB565;
+  op.out.buffer = g_fb;
+  op.out.buffer_size = FB_W * FB_H * 2;
+  op.out.pic_w = FB_W;
+  op.out.pic_h = FB_H;
+  op.out.block_offset_y = row;
+  op.out.srm_cm = PPA_SRM_COLOR_MODE_RGB565;
+  op.rotation_angle = PPA_SRM_ROTATION_ANGLE_0;
+  op.scale_x = op.scale_y = 1.0f;
+  op.mode = PPA_TRANS_MODE_BLOCKING;
+  return ppa_do_scale_rotate_mirror(g_ppa, &op) == ESP_OK;
+}
+
+#include "pointer.h"
+
 // ---- PC connection ------------------------------------------------------------------------------------------
 
 static int64_t g_event_sent = 0;   // when the last event went to the PC
@@ -234,6 +266,7 @@ static void send_event(uint8_t type, int x, int y, uint8_t flags = 0, uint16_t z
 #include "lanes.h"
 
 static void drop_client() {
+  ptr_erase();
   lanes_close();
   if (g_have_client) g_client.stop();
   g_have_client = g_shown_any = false;
@@ -265,14 +298,21 @@ static bool handle_strip(const RectHeader& h) {
   if (!read_exact(g_in, h.len)) { Serial.println("ERR short read"); return false; }
   const int64_t t1 = esp_timer_get_time();
   const int row = g_rot == 1 ? h.x : SCR_W - h.x - h.w;   // first frame buffer row
+  // under the mouse pointer: decoded aside, the pointer blended in, then copied into place (so it doesn't flicker)
+  const bool ptr = ptr_over(h.x, 0, h.w, SCR_H);
   jpeg_decode_cfg_t cfg = {};
   cfg.output_format = JPEG_DECODE_OUT_FORMAT_RGB565;
   cfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR;
   cfg.conv_std = JPEG_YUV_RGB_CONV_STD_BT601;
   uint32_t out_size = 0;
-  if (jpeg_decoder_process(g_jpeg, &cfg, g_in, h.len, (uint8_t*)(g_fb + (size_t)row * FB_W), (size_t)h.w * FB_W * 2,
+  uint16_t* dst = ptr ? (uint16_t*)g_out : g_fb + (size_t)row * FB_W;
+  if (jpeg_decoder_process(g_jpeg, &cfg, g_in, h.len, (uint8_t*)dst, ptr ? g_out_cap : (size_t)h.w * FB_W * 2,
                            &out_size) != ESP_OK)
     Serial.printf("ERR decode strip %u (%u bytes out)\n", h.w, (unsigned)out_size);
+  else if (ptr) {
+    ptr_patch({dst, true, g_rot, row, h.w, 0, 0, 0, 0});
+    if (!ppa_copy_rows(dst, row, h.w)) Serial.println("ERR ppa");
+  }
   g_stats.strips++;
   g_stats.bytes += h.len;
   g_stats.recv_us += t1 - t0;
@@ -306,8 +346,9 @@ static bool handle_rect() {
     g_power_mode = h.x == 1 ? 1 : 0;
     g_multitouch = h.y & 1;
     g_gestures = h.y & 2;
-    Serial.printf("PC: WiFi power save %s, %s%s\n", g_power_mode ? "off" : "auto", g_multitouch ? "multi-touch" : "one finger",
-                  g_gestures ? ", gestures" : "");
+    g_mouse_pc = h.y & 4;
+    Serial.printf("PC: WiFi power save %s, %s%s%s\n", g_power_mode ? "off" : "auto", g_multitouch ? "multi-touch" : "one finger",
+                  g_gestures ? ", gestures" : "", g_mouse_pc ? ", mouse" : "");
     return true;
   }
   if (memcmp(h.magic, "TPTS", 4) == 0) { pace_stamp(h); return true; }
@@ -349,6 +390,7 @@ static bool handle_rect() {
     return true;   // skip this rectangle but keep the connection
   }
   const int64_t t2 = esp_timer_get_time();
+  if (ptr_over(h.x, h.y, h.w, h.h)) ptr_patch({(uint16_t*)g_out, false, 0, 0, 0, h.x, h.y, h.w, h.h});
   if (!ppa_blit(g_out, h.x, h.y, h.w, h.h)) Serial.println("ERR ppa");
   const int64_t t3 = esp_timer_get_time();
   g_stats.rects++;
@@ -367,11 +409,11 @@ static void pc_poll() {
     g_client = incoming;
     g_client.setNoDelay(true);
     g_have_client = true;
-    g_multitouch = g_gestures = false;                // until the PC asks for them
+    g_multitouch = g_gestures = g_mouse_pc = false;   // until the PC asks for them
     g_pace = {};
     g_pc_ip = (uint32_t)g_client.remoteIP();
     Serial.printf("PC connected from %s\n", g_client.remoteIP().toString().c_str());
-    send_event(EV_HELLO, 1, 3, HELLO_SOUND | HELLO_STRIPS | (g_rot == 3 ? HELLO_FLIPPED : 0), 2);   // version 1.3.2
+    send_event(EV_HELLO, 1, 4, HELLO_SOUND | HELLO_STRIPS | (g_rot == 3 ? HELLO_FLIPPED : 0), 0);   // version 1.4.0
     lanes_offer();
   }
   if (!g_have_client) return;
@@ -541,6 +583,7 @@ static void script_touch(int x0, int y0, int x1, int y1, int ms) { g_script = {n
 #include "battery.h"
 #include "settings_ui.h"
 #include "keyboard.h"
+#include "usb_hid.h"
 
 // ---- touch on the mirrored page -------------------------------------------------------------------------------
 // Touches are forwarded to the PC, except a swipe that starts at an edge and moves inwards: that opens the settings.
@@ -585,6 +628,7 @@ static void handle_touch() {
     return;
   }
   g_last_touch = now;
+  ptr_hide();   // the finger is the pointer now
   if (st == IDLE) {
     first = f[0].id; sx = f[0].x; sy = f[0].y; t0 = last_move = now; nsent = 0;
     if (!page) st = LOCAL;   // nothing mirrored: any tap opens the settings
@@ -694,6 +738,11 @@ static void print_stats() {
   Serial.printf("battery | %s\n", batt);
   Serial.printf("keyboard | %s 0x%02X | %u key events | %u probes, longest %u us\n", g_kbd.present ? "firmware" : "none, last firmware",
                 g_kbd.version, g_kbd.keys, g_kbd.probes, g_kbd.probe_us_max);
+  Serial.printf("usb | %u keyboards, %u mice seen | %u key reports, %u mouse reports | pointer %s at %d,%d, %u draws, "
+                "%u patches, blend %s\n", (unsigned)g_ustats.keyboards, (unsigned)g_ustats.mice, (unsigned)g_ustats.reports,
+                (unsigned)g_ustats.mouse_reports, g_ptr.drawn ? "drawn" : g_ptr.shown ? "shown" : "hidden", g_ptr.x, g_ptr.y,
+                (unsigned)g_ptr_stats.draws, (unsigned)g_ptr_stats.patches, g_ptr.simd ? "PIE" : "C");
+  g_ptr_stats = {};
   const LaneStats ls = g_lstats;
   g_lstats = {};
   Serial.printf("lanes | %d in use | chunks %u | waited for data %u times, %u ms (lanes %u/%u), longest %u ms | longest idle %u ms on lane %u, others holding %u bytes\n", g_lanes_on,
@@ -765,6 +814,13 @@ static void handle_serial() {
       g_script2 = {g_script.t0, ms, cx + d0 / 2, cy, cx + d1 / 2, cy};
       g_script3 = {};
       Serial.printf("pinch at %d,%d: %d -> %d px in %d ms\n", cx, cy, d0, d1, ms);
+    } else if (line.startsWith("mouse ")) {   // mouse <dx> <dy> [buttons] [wheel]: a scripted USB mouse report
+      int dx = 0, dy = 0, b = 0, w = 0;
+      sscanf(line.c_str() + 6, "%d %d %d %d", &dx, &dy, &b, &w);
+      const UsbMouseReport m = {(uint8_t)b, (int16_t)dx, (int16_t)dy, (int8_t)w, 0};
+      xQueueSend(g_usb_mq, &m, 0);
+    } else if (line == "simd") {
+      ptr_report(ptr_selftest());
     } else if (line == "beep") {   // speaker check: a 1 kHz tone, and the codec and amplifier state
       const bool on = speaker_on();
       g_spk_keep = now_ms() + 2000;
@@ -791,7 +847,7 @@ static void handle_serial() {
       const int sp = line.indexOf(' ', 5);
       wifi_start(sp > 0 ? line.substring(5, sp) : line.substring(5), sp > 0 ? line.substring(sp + 1) : "");
     } else if (line.length()) {
-      Serial.println("commands: ip | wifi <ssid> <password> | wifiinfo | rot | rot auto | S | F | T <x> <y> | drag x0 y0 x1 y1 [ms] | pinch cx cy d0 d1 [ms] | three x0 x1 y [ms] | panel | beep | forget");
+      Serial.println("commands: ip | wifi <ssid> <password> | wifiinfo | rot | rot auto | S | F | T <x> <y> | drag x0 y0 x1 y1 [ms] | pinch cx cy d0 d1 [ms] | three x0 x1 y [ms] | mouse dx dy [buttons] [wheel] | panel | simd | beep | forget");
     }
     line = "";
   }
@@ -818,6 +874,7 @@ void setup() {
   g_rot = auto_rot ? (kbd_present_at_boot() ? 3 : 1) : prefs.getInt("rot", 1) == 3 ? 3 : 1;
   if (auto_rot) Serial.printf("rotation %d (none saved; %s)\n", g_rot, g_rot == 3 ? "keyboard fitted" : "no keyboard");
   g_bri = (uint8_t)constrain((int)prefs.getUChar("bri", 160), 10, 255);
+  g_scroll_rev = prefs.getBool("srev", false);
   M5.Display.setRotation(g_rot);
   M5.Display.setBrightness(g_bri);
   audio_setup();
@@ -825,7 +882,9 @@ void setup() {
     show_status("Hardware setup failed", "JPEG decoder / PPA / memory");
     for (;;) delay(1000);
   }
+  ptr_setup();
   ui_setup();
+  usb_setup();
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
   lanes_begin();
@@ -849,6 +908,7 @@ void loop() {
   speaker_poll();
   battery_poll();
   kbd_poll();
+  usb_poll();
   set_wifi_sleep(g_power_mode == 0 && !g_panel_open && now_ms() - g_last_touch > AWAKE_AFTER_TOUCH_MS &&
                  now_ms() - g_last_stream > AWAKE_AFTER_STREAM_MS && !audio_recent(AWAKE_AFTER_SOUND_MS));
   // while updates stream in, come back quickly for the next one; otherwise save power

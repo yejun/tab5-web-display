@@ -3,40 +3,38 @@
 <head>
 <meta charset="utf-8">
 <title>Tab5 motion</title>
+<link rel="stylesheet" href="common.css">
 <style>
-  :root { --bg: #11141c; --card: #1a1f2b; --line: #2a3142; --ink: #e8e4da; --dim: #8b93a7;
-          --accent: hsl(168, 70%, 62%); --accent-soft: hsl(168, 45%, 24%); }
-  * { box-sizing: border-box; margin: 0; -webkit-tap-highlight-color: transparent; user-select: none; }
-  html, body { width: 1280px; height: 720px; overflow: hidden; background: var(--bg); color: var(--ink);
-               font: 22px/1.3 "Inter", "Noto Sans", "DejaVu Sans", sans-serif; }
+  /* a frame-rate test: the panels are see-through but not frosted, as blurring what moves behind them would cost
+     Chromium time on every frame and skew what's measured */
+  :root { --panel: rgba(10, 13, 22, .62); }
   #bg { position: fixed; inset: 0; z-index: 0; }
   main { position: relative; z-index: 1; display: grid; grid-template-columns: 280px 1fr; gap: 20px;
          padding: 24px 28px; height: 100%; }
   aside { display: flex; flex-direction: column; gap: 12px; }
-  h1 { font-size: 30px; font-weight: 600; margin-bottom: 6px; }
+  h1 { font-size: 32px; font-weight: 650; letter-spacing: -.015em; margin-bottom: 6px; }
   .links { display: flex; gap: 24px; }
   a.back { color: var(--dim); text-decoration: none; font-size: 20px; }
-  button { font: inherit; font-size: 24px; color: var(--ink); background: rgba(26, 31, 43, .85);
-           border: 1px solid var(--line); border-radius: 16px; height: 64px; text-align: left; padding: 0 20px; }
-  button.on { background: var(--accent-soft); border-color: var(--accent); }
+  button { font-size: 22px; background: var(--panel); border-radius: 20px; height: 64px; text-align: left; padding: 0 20px; }
+  button.on { background: color-mix(in srgb, var(--accent) 22%, var(--panel)); border-color: var(--accent); }
   button:active { background: var(--accent); color: var(--bg); }
   button small { display: block; font-size: 15px; color: var(--dim); margin-top: -4px; }
   button.on small { color: var(--ink); opacity: .7; }
-  #stats { margin-top: auto; background: rgba(26, 31, 43, .85); border: 1px solid var(--line); border-radius: 16px;
+  #stats { margin-top: auto; background: var(--panel); border: 1px solid var(--edge); border-radius: 20px;
            padding: 14px 18px; font-size: 18px; color: var(--dim); font-variant-numeric: tabular-nums; }
   #stats div { display: flex; justify-content: space-between; align-items: baseline; }
   #stats b { color: var(--ink); font-weight: 500; }
-  #stats .big b { color: var(--accent); font-size: 30px; line-height: 1; }
-  #stage { position: relative; border-radius: 22px; border: 1px solid var(--line); background: rgba(12, 15, 21, .6);
+  #stats .big b { color: var(--accent); font-size: 32px; font-weight: 300; line-height: 1; }
+  #stage { position: relative; border-radius: 26px; border: 1px solid var(--edge); background: rgba(4, 6, 12, .45);
            overflow: hidden; touch-action: none; }
   #stage canvas { position: absolute; inset: 0; }
   #hint { position: absolute; left: 24px; bottom: 18px; color: var(--dim); font-size: 18px; }
 
   /* "Spinner": small CSS animations only */
   #spin { position: absolute; inset: 0; display: none; place-items: center; }
-  .ring { width: 150px; height: 150px; border-radius: 50%; border: 14px solid #2b3242;
+  .ring { width: 150px; height: 150px; border-radius: 50%; border: 14px solid rgba(255, 255, 255, .10);
           border-top-color: var(--accent); animation: turn 1s linear infinite; }
-  .bar { position: absolute; top: calc(50% + 120px); width: 360px; height: 10px; border-radius: 5px; background: #2b3242;
+  .bar { position: absolute; top: calc(50% + 120px); width: 360px; height: 10px; border-radius: 5px; background: rgba(255, 255, 255, .10);
          overflow: hidden; }
   .bar::after { content: ""; position: absolute; inset: 0; width: 30%; background: var(--accent); border-radius: 5px;
                 animation: slide 1.6s ease-in-out infinite; }

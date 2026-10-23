@@ -6,7 +6,8 @@
 <link rel="stylesheet" href="common.css">
 <style>
   /* Chinese almanac: warm red and gold on the shared dark theme */
-  :root { --red: #e8695f; --red-soft: #4a2427; --gold: #e9c27a; --jade: #6fcf9f; --jade-soft: #1f3a30;
+  :root { --red: #ff7468; --red-soft: rgba(255, 110, 100, .16); --gold: #f0cd85; --jade: #74dba8; --jade-soft: rgba(110, 215, 160, .15);
+          --g1: #a8323c; --g2: #b8742a; --g3: #6a2a6a;   /* a warm sky */
           --cjk: "Almanac Kai", "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", sans-serif;
           --serif: "Almanac Brush", "Almanac Kai", serif; }
   /* Bundled fonts, cut down to the characters the almanac can show (see fonts/): LXGW WenKai for the text,
@@ -16,30 +17,34 @@
   body { font-family: var(--cjk); padding: 22px 28px; display: grid; gap: 14px;
          grid-template: "head head" 56px "day yiji" 214px "day info" 1fr "hours hours" 104px / 392px 1fr; }
   header { grid-area: head; display: flex; align-items: center; gap: 12px; }
-  header h1 { font-family: var(--serif); font-size: 34px; font-weight: 700; color: var(--gold); letter-spacing: 4px; }
+  header h1 { font-family: var(--serif); font-size: 38px; font-weight: 400; letter-spacing: 4px;
+               background: linear-gradient(180deg, #ffe6a8, #e0a850); -webkit-background-clip: text; color: transparent; }
   header .sp { flex: 1; }
-  header button { height: 52px; padding: 0 20px; font-size: 20px; font-family: var(--cjk); }
-  #today { background: var(--red-soft); border-color: var(--red); }
+  header button { height: 48px; padding: 0 20px; font-size: 20px; font-family: var(--cjk); }
+  #today { background: linear-gradient(145deg, #ff7a6a, #c43a3f); border-color: transparent; color: #fff; font-weight: 600; }
 
   #day { grid-area: day; display: flex; flex-direction: column; align-items: center; text-align: center; padding: 18px 20px; }
   #ym { font-size: 22px; color: var(--dim); }
-  #dnum { font-size: 132px; font-weight: 300; line-height: 1; color: var(--red); margin: 2px 0; font-family: "Noto Sans", sans-serif; }
+  #dnum { font-size: 136px; font-weight: 200; line-height: 1; margin: 2px 0; letter-spacing: -.04em;
+          font-family: "Inter Tab5", "Noto Sans", sans-serif;
+          background: linear-gradient(180deg, #ff9a7a, #e8453f); -webkit-background-clip: text; color: transparent; }
   #week { font-size: 22px; color: var(--dim); }
   #lunar { font-family: var(--serif); font-size: 50px; color: var(--gold); margin-top: 10px; letter-spacing: 2px; }
   #gz { font-size: 21px; margin-top: 6px; }
   #term { font-size: 19px; color: var(--dim); margin-top: 10px; }
   #fest { font-size: 19px; color: var(--red); margin-top: 4px; min-height: 26px; }
   #badges { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: auto; }
-  .badge { font-size: 17px; padding: 4px 12px; border-radius: 10px; background: var(--card2); color: var(--dim); }
+  .badge { font-size: 17px; padding: 5px 14px; border-radius: 999px; background: var(--glass2); color: var(--dim); }
   .badge.good { background: var(--jade-soft); color: var(--jade); }
   .badge.bad { background: var(--red-soft); color: var(--red); }
 
   #yiji { grid-area: yiji; display: grid; grid-template-columns: 3fr 2fr; gap: 14px; }
   .yj { display: flex; gap: 16px; padding: 16px 20px; overflow: hidden; }
-  .yj .big { flex: none; width: 74px; height: 74px; border-radius: 50%; display: grid; place-items: center;
-             font-family: var(--serif); font-size: 42px; font-weight: 700; }
-  #yi .big { background: var(--jade-soft); color: var(--jade); }
-  #ji .big { background: var(--red-soft); color: var(--red); }
+  .yj .big { flex: none; width: 76px; height: 76px; border-radius: 24px; display: grid; place-items: center;
+             font-family: var(--serif); font-size: 44px; font-weight: 400; color: #fff;
+             box-shadow: inset 0 1px 0 rgba(255, 255, 255, .35), 0 10px 24px -8px var(--sh); }
+  #yi .big { background: linear-gradient(145deg, #6fe0a8, #1f8a5f); --sh: #1f8a5f; }
+  #ji .big { background: linear-gradient(145deg, #ff7a6a, #b8283a); --sh: #b8283a; }
   .yj .items { font-size: 22px; line-height: 1.5; overflow: hidden; flex: 1; min-height: 0; max-height: 100%; }
   .yj { min-height: 0; }
   .yj .items span { display: inline-block; margin-right: .6em; }
@@ -51,14 +56,14 @@
   .row.wide { grid-column: 1 / -1; }
 
   #hours { grid-area: hours; display: grid; grid-template-columns: repeat(12, 1fr); gap: 6px; padding: 12px 14px; }
-  .h { border-radius: 14px; display: flex; flex-direction: column; align-items: center; justify-content: center;
-       background: var(--card2); }
+  .h { border-radius: 16px; display: flex; flex-direction: column; align-items: center; justify-content: center;
+       background: var(--glass2); border: 1px solid rgba(255, 255, 255, .05); }
   .h b { font-family: var(--serif); font-size: 26px; font-weight: 600; }
   .h small { font-size: 14px; color: var(--faint); }
   .h i { font-style: normal; font-size: 16px; }
   .h.good i { color: var(--jade); }
   .h.bad i { color: var(--red); }
-  .h.now { outline: 2px solid var(--gold); background: #2b2a24; }
+  .h.now { border: 2px solid var(--gold); background: rgba(240, 205, 133, .14); box-shadow: 0 0 22px -4px rgba(240, 205, 133, .5); }
 </style>
 </head>
 <body>

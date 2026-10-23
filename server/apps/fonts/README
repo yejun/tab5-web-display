@@ -1,4 +1,9 @@
-Fonts for the almanac (老黄历), cut down to the characters it can show:
+Fonts for the built-in apps, cut down to the characters they can show:
+
+  inter-variable.woff2         Inter 4.1 (https://github.com/rsms/inter), SIL OFL 1.1, variable (weight 100-900,
+                               optical size): the dashboard - Latin, Latin-1 and Latin Extended-A, punctuation, arrows
+
+Fonts for the almanac (老黄历):
 
   lxgw-wenkai-almanac.woff2    LXGW WenKai 霞鹜文楷 v1.522 (https://github.com/lxgw/LxgwWenKai), SIL OFL 1.1
                                - every CJK character in ../vendor/lunar.js, almanac.html and home.html, plus ASCII
@@ -6,3 +11,6 @@ Fonts for the almanac (老黄历), cut down to the characters it can show:
                                - only the big characters: 老黄历宜忌, the twelve branches, lunar month and day names
 
 Made with fontTools:  pyftsubset FONT.ttf --text-file=CHARS.txt --flavor=woff2 --layout-features='*'
+  Inter:  pyftsubset InterVariable.ttf --unicodes="U+0020-007E,U+00A0-017F,U+0192,U+02C6,U+02DA,U+02DC,U+2000-206F,
+          U+20AC,U+2122,U+2190-2199,U+2212,U+2215,U+221E,U+2248,U+2260,U+2264,U+2265,U+25CF" --flavor=woff2
+          --layout-features='kern,liga,calt,tnum,case,ccmp,locl,mark,mkmk,ss01,ss02,cv05,cv08,cv11,zero'

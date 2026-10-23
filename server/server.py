@@ -43,7 +43,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from playwright.async_api import async_playwright
 
-__version__ = "1.3.2"
+__version__ = "1.4.0"
 
 W, H, TILE, PORT = 1280, 720, 16, 8765
 # Chromium's rasterisation jitters a few pixels by a few levels between frames. A tile counts as changed if some
@@ -78,15 +78,22 @@ SOFT_MIN = 48         # 4:2:0 only for pieces this big both ways: the Tab5's dec
 TOUCH_QUIET_S = 0.5   # ... but only one in flight this soon after a touch, where delay matters more than frame rate
 RECT = struct.Struct("<4sHHHHI")   # "TAB5" (or "TABS", a strip), x, y, w, h, jpeg length
 EVENT = struct.Struct("<BBHHH")    # type, flags, x, y, z
-EV_DOWN, EV_MOVE, EV_UP, EV_SHOWN, EV_HELLO, EV_LANES, EV_KEY, EV_GESTURE = 1, 2, 3, 5, 6, 7, 9, 10
+EV_DOWN, EV_MOVE, EV_UP, EV_SHOWN, EV_HELLO, EV_LANES, EV_KEY, EV_GESTURE, EV_MOUSE = 1, 2, 3, 5, 6, 7, 9, 10, 11
 # Gestures (firmware 1.3, when asked for): swipes in from the left / right / bottom edge (the top one opens the Tab5's
 # settings), and three fingers swiped right / left. They switch and close tabs, and go back and forward.
 GEST_LEFT, GEST_RIGHT, GEST_BOTTOM, GEST_THREE_RIGHT, GEST_THREE_LEFT = 1, 2, 3, 4, 5
-TCFG_MULTITOUCH, TCFG_GESTURES = 1, 2
+TCFG_MULTITOUCH, TCFG_GESTURES, TCFG_MOUSE = 1, 2, 4
+# A USB mouse on the Tab5 (firmware 1.4, when asked for): EV_MOUSE carries the pointer in x, y, the buttons held in
+# flags bits 0-4 (left, right, middle, back, forward: the same bits as CDP's "buttons"), Ctrl / Shift / Alt in bits 5-7,
+# and the wheel's steps since the last event in z (low byte, int8, + = up), the horizontal wheel's in the high byte.
+# The Tab5 draws the pointer itself. Without TCFG_MOUSE (a video), its left button acts as a finger.
+MOUSE_BUTTONS = ("left", "right", "middle", "back", "forward")
+WHEEL_PX = 100        # a wheel step scrolls this far, as in Chrome
+DOUBLE_CLICK_S, DOUBLE_CLICK_PX = 0.5, 4
 TOAST_S = 1.5         # a note at the top of the screen (which tab, back, ...) shows this long
-# Keys (firmware 1.3, with M5Stack's Tab5 Keyboard): EV_KEY carries flags 1 = down / 0 = up, x = a USB HID usage
-# code, y = HID modifier bits. Each code's DOM key (unshifted, shifted), DOM code and Windows key code:
-HID_CTRL, HID_SHIFT, HID_ALT = 1, 2, 4
+# Keys (firmware 1.3, with M5Stack's Tab5 Keyboard; 1.4 also USB keyboards): EV_KEY carries flags 1 = down / 0 = up,
+# x = a USB HID usage code, y = HID modifier bits. Each code's DOM key (unshifted, shifted), DOM code and Windows key code:
+HID_CTRL, HID_SHIFT, HID_ALT, HID_GUI = 1, 2, 4, 8
 HID_KEYS = {
     **{0x04 + i: (c, c.upper(), "Key" + c.upper(), ord(c.upper())) for i, c in enumerate("abcdefghijklmnopqrstuvwxyz")},
     **{0x1E + i: (c, s, "Digit" + c, ord(c)) for i, (c, s) in enumerate(zip("1234567890", "!@#$%^&*()"))},
@@ -99,7 +106,16 @@ HID_KEYS = {
     0x50: ("ArrowLeft", None, "ArrowLeft", 37), 0x51: ("ArrowDown", None, "ArrowDown", 40),
     0x52: ("ArrowUp", None, "ArrowUp", 38), 0x4A: ("Home", None, "Home", 36), 0x4B: ("PageUp", None, "PageUp", 33),
     0x4D: ("End", None, "End", 35), 0x4E: ("PageDown", None, "PageDown", 34),
+    # on USB keyboards
+    **{0x3A + i: (f"F{i + 1}", None, f"F{i + 1}", 112 + i) for i in range(12)},
+    0x48: ("Pause", None, "Pause", 19), 0x49: ("Insert", None, "Insert", 45),
+    0x54: ("/", None, "NumpadDivide", 111), 0x55: ("*", None, "NumpadMultiply", 106),
+    0x56: ("-", None, "NumpadSubtract", 109), 0x57: ("+", None, "NumpadAdd", 107), 0x58: ("Enter", None, "NumpadEnter", 13),
+    **{0x59 + i: (str(i + 1), None, f"Numpad{i + 1}", 97 + i) for i in range(9)},
+    0x62: ("0", None, "Numpad0", 96), 0x63: (".", None, "NumpadDecimal", 110),
+    0x64: ("\\", "|", "IntlBackslash", 226), 0x65: ("ContextMenu", None, "ContextMenu", 93),
 }
+ENTER_KEYS = (0x28, 0x58)
 KEY_DELAY_S, KEY_RATE_S = 0.5, 1 / 30   # a held key repeats after this long, this often (the keyboard doesn't repeat)
 # Lanes (firmware 1.3): one TCP connection carries at most ~3 MB/s to the Tab5, because its 64 KB receive window is
 # fixed; spread over two connections in chunks, ~4.4 MB/s on WiFi 6. See firmware/web_display/lanes.h (also for why
@@ -449,6 +465,7 @@ class Mirror:
 
     multitouch = True   # ask the Tab5 for every finger (firmware 1.3): the browser pinch-zooms and scrolls with them
     gestures = True     # ... and for its swipes: tabs, back and forward
+    mouse = True        # ... and for a USB mouse's events (firmware 1.4): hover, clicks, the wheel
     paced = False       # frames carry due times, for the Tab5's playout buffer (video files)
     all_motion = False  # every change is motion (a video file): never sent as still content during playback
 
@@ -478,6 +495,8 @@ class Mirror:
         self.inputs, self.input_wake = collections.deque(), asyncio.Event()   # touches and keys waiting for the page
         self.fingers = {}              # finger -> (x, y): what is on the screen now, as far as the page will know
         self.repeater = None           # repeats the key held down
+        self.mouse_at, self.mouse_buttons = None, 0   # where the page last heard the mouse was, and its buttons
+        self.last_click = (0.0, 0, 0, None, 0)        # time, x, y, button and count of the last press (double clicks)
         self.lane_offer, self.lane_answer, self.lane_answered = None, None, asyncio.Event()
         self.lanes, self.lane_readers, self.seq = [], [], 0   # lane writers, and the next chunk's number
         self.lanes_broken = False      # a lane setup failed: don't try again in this run
@@ -646,20 +665,39 @@ class Mirror:
         self.touch_at = time.monotonic()
         self.dirty.set()
 
+    async def browser_key(self, down, code, mod, repeat):
+        """The browser's own shortcuts, which a headless one doesn't have: Alt+Left / Right (back / forward), F5 and
+        Ctrl+R (reload), Ctrl+Tab and Ctrl+Shift+Tab (next / previous tab), Ctrl+W (close the tab). True if it was one."""
+        action = {(HID_ALT, 0x50): "back", (HID_ALT, 0x4F): "forward", (0, 0x3E): "reload", (HID_CTRL, 0x15): "reload",
+                  (HID_CTRL, 0x2B): "next", (HID_CTRL | HID_SHIFT, 0x2B): "previous", (HID_CTRL, 0x1A): "close"}.get((mod, code))
+        if not action:
+            return False
+        if down and not repeat:
+            if action in ("back", "forward"):
+                await self.history(-1 if action == "back" else 1)
+            elif action == "reload":
+                try:
+                    await asyncio.wait_for(self.cdp.send("Page.reload"), 2)
+                    self.show_toast("Reload")
+                except TIMEOUTS:
+                    print("reload timed out (page busy)")
+            else:
+                await self.gesture({"next": GEST_RIGHT, "previous": GEST_LEFT, "close": GEST_BOTTOM}[action])
+        return True
+
+    @staticmethod
+    def cdp_modifiers(mod):
+        return (mod & HID_ALT and 1) | (mod & HID_CTRL and 2) | (mod & HID_GUI and 4) | (mod & HID_SHIFT and 8)
+
     async def key(self, down, code, mod, repeat=False):
-        if code not in HID_KEYS:
-            return
-        if mod == HID_ALT and code in (0x50, 0x4F):   # Alt+Left / Right: back / forward, as in a browser
-            if down and not repeat:
-                await self.history(-1 if code == 0x50 else 1)
+        if await self.browser_key(down, code, mod, repeat) or code not in HID_KEYS:
             return
         name, shifted, dom_code, vk = HID_KEYS[code]
         key = shifted if mod & HID_SHIFT and shifted else name
-        p = {"type": "keyUp", "key": key, "code": dom_code, "windowsVirtualKeyCode": vk,
-             "modifiers": (mod & HID_CTRL and 2) | (mod & HID_SHIFT and 8) | (mod & HID_ALT and 1)}
+        p = {"type": "keyUp", "key": key, "code": dom_code, "windowsVirtualKeyCode": vk, "modifiers": self.cdp_modifiers(mod)}
         if down:
-            text = "\r" if code == 0x28 else key if len(key) == 1 else ""
-            if text and not mod & (HID_CTRL | HID_ALT):   # a key that types
+            text = "\r" if code in ENTER_KEYS else key if len(key) == 1 else ""
+            if text and not mod & (HID_CTRL | HID_ALT | HID_GUI):   # a key that types
                 p.update(type="keyDown", text=text, unmodifiedText=text)
             else:   # a key that does something (Backspace, arrows, Ctrl+A, ...)
                 p["type"] = "rawKeyDown"
@@ -671,6 +709,52 @@ class Mirror:
         if not repeat:
             self.touch_at = time.monotonic()
         self.dirty.set()
+
+    async def mouse_event(self, flags, x, y, z):
+        """A USB mouse: moves (hover), then buttons let go and pressed, then the wheel, in that order. Its back and
+        forward buttons go back and forward in the tab's history, as in a browser."""
+        buttons, mods = flags & 0x1F, self.cdp_modifiers(flags >> 5)
+        wheel, pan = struct.unpack("<bb", struct.pack("<H", z))
+        base = {"x": x, "y": y, "modifiers": mods, "buttons": buttons, "pointerType": "mouse"}
+        events = []
+        if (x, y) != self.mouse_at:
+            held = next((name for i, name in enumerate(MOUSE_BUTTONS[:3]) if self.mouse_buttons & 1 << i), "none")
+            events.append({**base, "type": "mouseMoved", "button": held, "buttons": self.mouse_buttons})
+        for i, name in enumerate(MOUSE_BUTTONS):
+            bit = 1 << i
+            if not (buttons ^ self.mouse_buttons) & bit:
+                continue
+            if i >= 3:   # back, forward: on press
+                if buttons & bit:
+                    await self.history(-1 if i == 3 else 1)
+                continue
+            now = time.monotonic()
+            if buttons & bit:
+                t, cx, cy, cb, n = self.last_click
+                same = cb == name and now - t < DOUBLE_CLICK_S and abs(x - cx) <= DOUBLE_CLICK_PX and abs(y - cy) <= DOUBLE_CLICK_PX
+                self.last_click = (now, x, y, name, n + 1 if same else 1)
+            events.append({**base, "type": "mousePressed" if buttons & bit else "mouseReleased", "button": name,
+                           "clickCount": self.last_click[4] if self.last_click[3] == name else 1})
+        if wheel or pan:
+            events.append({**base, "type": "mouseWheel", "button": "none", "deltaX": pan * WHEEL_PX, "deltaY": -wheel * WHEEL_PX})
+        self.mouse_at, self.mouse_buttons = (x, y), buttons
+        try:
+            for e in events:
+                await asyncio.wait_for(self.cdp.send("Input.dispatchMouseEvent", e), 2)
+        except TIMEOUTS:
+            print("mouse event timed out (page busy or navigating)")
+        self.touch_at = time.monotonic()
+        self.dirty.set()
+
+    def queue_mouse(self, flags, x, y, z):
+        """As touches: in order with keys and touches, and a move waiting behind a busy page is replaced by the next."""
+        entry = (EV_MOUSE, flags, x, y, z)
+        last = self.inputs[-1] if self.inputs else None
+        if not z and last and last[0] == EV_MOUSE and last[1] == flags and not last[4]:
+            self.inputs[-1] = entry
+        else:
+            self.inputs.append(entry)
+        self.input_wake.set()
 
     def queue_key(self, down, code, mod):
         """Keys go in the same queue as touches, so the two reach the page in order. The keyboard reports only
@@ -716,6 +800,8 @@ class Mirror:
                     await self.key(*rest)
                 elif kind == EV_GESTURE:
                     await self.gesture(*rest)
+                elif kind == EV_MOUSE:
+                    await self.mouse_event(*rest)
                 else:
                     await self.touch(kind, *rest)
 
@@ -748,6 +834,10 @@ class Mirror:
                     print(f"gesture {x}")
                 self.inputs.append((EV_GESTURE, x))
                 self.input_wake.set()
+            elif kind == EV_MOUSE:
+                if self.args.verbose and (flags & 0x1F != self.mouse_buttons or _z):
+                    print(f"mouse {x},{y} buttons {flags & 0x1F:05b} wheel {_z:04x}")
+                self.queue_mouse(flags, x, y, _z)
             elif kind == EV_KEY:
                 if self.args.verbose:
                     print(f"key {'down' if flags & 1 else 'up'} {HID_KEYS.get(x, ('0x%02x' % x,))[0]!r} modifiers {y}")
@@ -759,7 +849,7 @@ class Mirror:
                     self.lane_answer = flags
                     self.lane_answered.set()
             elif kind == EV_HELLO:   # firmware 1.1 or later: it takes settings and can play sound
-                self.writer.write(RECT.pack(b"TCFG", POWER_SAVE[self.args.power_save], self.multitouch * TCFG_MULTITOUCH | self.gestures * TCFG_GESTURES, 0, 0, 0))
+                self.writer.write(RECT.pack(b"TCFG", POWER_SAVE[self.args.power_save], self.multitouch * TCFG_MULTITOUCH | self.gestures * TCFG_GESTURES | self.mouse * TCFG_MOUSE, 0, 0, 0))
                 if self.audio and flags & HELLO_SOUND:
                     self.audio.target = (self.host, PORT)
                 self.strips, self.flipped = bool(flags & HELLO_STRIPS), bool(flags & HELLO_FLIPPED)
@@ -774,6 +864,7 @@ class Mirror:
         self.in_flight.clear()
         self.inputs.clear()
         self.fingers.clear()
+        self.mouse_at, self.mouse_buttons = None, 0
         self.strips = self.flipped = False
         self.firmware = None
         self.lane_offer, self.lanes, self.seq = None, [], 0
@@ -1264,7 +1355,8 @@ class VideoMirror(Mirror):
     the position while paused or seeking and for a few seconds after a touch. With the keyboard: Space pauses and
     resumes, the left and right arrows seek, and 0-9 jump to 0-90 % of the way through."""
 
-    multitouch = gestures = False   # one finger: tap and drag (every edge swipe opens the settings)
+    multitouch = gestures = mouse = False   # one finger: tap and drag (every edge swipe opens the settings); a
+    # mouse's left button acts as that finger
     paced = all_motion = True
 
     def __init__(self, args, audio, path, info):

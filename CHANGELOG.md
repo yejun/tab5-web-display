@@ -3,6 +3,35 @@
 Versions follow [semantic versioning](https://semver.org). The firmware prints its version at boot, in the serial
 `S` statistics and in its settings panel; the server prints it at start and with `--version`.
 
+## 1.4.0 - 2026-10-22
+
+Firmware and server. Older firmware and servers work with these: the mouse then acts as a finger.
+
+- **USB keyboard and mouse:** plugged into the Tab5's USB-A port (a hub or one wireless receiver for both works).
+  - **Keyboards** type as the Tab5 Keyboard does, plus F1–F12, Insert and the number pad. Caps Lock works and
+    lights up on the keyboard; Scroll Lock opens the settings.
+  - **Mice** are read through their report descriptor, so the wheel, the horizontal wheel and five buttons work.
+    With server 1.4 the page gets real mouse events (protocol: event 11, asked for with bit 4 of the client
+    config): hover, clicks, double clicks, modifier clicks and the wheel; the side buttons go back and forward.
+    With a video or an older server the left button acts as a finger.
+  - **The pointer** is drawn by the Tab5, so it moves without a round trip to the PC. Updates under it are patched
+    before they reach the screen, so it doesn't flicker. It hides on touch. The settings panel shows it too.
+  - **PIE SIMD:** the pointer is blended 8 pixels per instruction with the ESP32-P4's PIE extension: 7.7 µs
+    instead of 86 µs in C. Checked against C at every start (serial `simd`).
+  - **Reverse scrolling** in the settings, for the mouse wheel.
+  - The serial `S` output has a `usb |` line, and `mouse dx dy [buttons] [wheel]` scripts a mouse report.
+- **Browser shortcuts (server):** F5 and Ctrl+R reload, Ctrl+Tab and Ctrl+Shift+Tab switch tabs, Ctrl+W closes
+  one. These work from the Tab5 Keyboard too where it has the keys.
+- **New look for the built-in apps:** frosted-glass cards on a dark sky whose glows follow the weather (dashboard,
+  home) or the time of day (clock), with a fine grain that stops the Tab5's 16-bit colour from banding. Inter is
+  bundled, so the apps look the same on every PC.
+  - **Home** shows the weather now, and tiles highlight under the mouse.
+  - **Dashboard:** temperature-coloured 24-hour curve with night shading and rain chances, the week's ranges on
+    one scale, the sun's path across the sky, wind direction.
+  - **Clock:** world clocks say "Today", "Tomorrow" or "Yesterday" and the offset.
+- **Settings panel restyled:** icons on the rows, slimmer sliders, pill buttons, a status dot for the PC, and the
+  joined network highlighted.
+
 ## 1.3.2 - 2026-10-17
 
 Firmware and server. Older firmware and servers work with these, without the playout buffer.

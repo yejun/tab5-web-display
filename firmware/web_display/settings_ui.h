@@ -4,8 +4,9 @@
 // connection is refused; the PC reconnects within 2 s of closing and sends a full frame.
 #pragma once
 
-static constexpr uint32_t C_BG = 0x11141c, C_CARD = 0x1a1f2b, C_LINE = 0x2a3142, C_INK = 0xe8e4da, C_DIM = 0x8b93a7,
-                          C_ACCENT = 0x5ae2c7, C_WARN = 0xf0a868;
+static constexpr uint32_t C_BG = 0x0b0e16, C_CARD = 0x151a25, C_CARD2 = 0x1e2431, C_LINE = 0x283042, C_INK = 0xeef2f8,
+                          C_DIM = 0x8e97ab, C_ACCENT = 0x5ae2c7, C_WARN = 0xf5b26b, C_OK = 0x5ee08f,
+                          C_SKY = 0x7cb8ff, C_SUN = 0xffcf5c, C_VIOLET = 0xb59cff, C_ROSE = 0xff8fa8;
 static constexpr int MAX_NETS = 24;
 
 struct Net { char ssid[33]; int8_t rssi; bool secure; };
@@ -13,9 +14,9 @@ static Net g_nets[MAX_NETS];
 static int g_net_count = 0;
 
 static lv_display_t* g_disp;
-static lv_obj_t *ui_wifi, *ui_addr, *ui_pc, *ui_hint, *ui_list, *ui_scan_btn, *ui_scan_lbl;
+static lv_obj_t *ui_wifi, *ui_addr, *ui_pc, *ui_pc_dot, *ui_hint, *ui_list, *ui_scan_btn, *ui_scan_lbl;
 static lv_obj_t *ui_modal, *ui_modal_title, *ui_ta_ssid, *ui_ta_pass, *ui_show_btn, *ui_msg, *ui_spinner, *ui_kb;
-static lv_obj_t *ui_connect_btn, *ui_bri, *ui_vol, *ui_kled, *ui_flip, *ui_batt;
+static lv_obj_t *ui_connect_btn, *ui_bri, *ui_vol, *ui_kled, *ui_flip, *ui_srev, *ui_batt;
 static bool g_scanning = false, g_connect_pending = false, g_touch_block = false;
 static String g_pending_ssid;   // the network the dialog is joining
 
@@ -42,6 +43,19 @@ static void ui_touch(lv_indev_t*, lv_indev_data_t* d) {
   d->point.y = ly;
 }
 
+// A USB mouse: the pointer (moved by usb_hid.h) and its left button. LVGL draws the arrow itself here.
+static void ui_mouse(lv_indev_t* indev, lv_indev_data_t* d) {
+  if (lv_obj_t* c = lv_indev_get_cursor(indev)) {
+    if (g_ptr.shown == lv_obj_has_flag(c, LV_OBJ_FLAG_HIDDEN)) {
+      if (g_ptr.shown) lv_obj_remove_flag(c, LV_OBJ_FLAG_HIDDEN);
+      else lv_obj_add_flag(c, LV_OBJ_FLAG_HIDDEN);
+    }
+  }
+  d->point.x = g_ptr.x;
+  d->point.y = g_ptr.y;
+  d->state = g_ptr.shown && (g_ptr.buttons & 1) ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+}
+
 static void* ui_alloc(size_t bytes) { return heap_caps_aligned_alloc(128, bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT); }
 
 // ---- small builders -----------------------------------------------------------------------------------------
@@ -53,7 +67,7 @@ static lv_obj_t* ui_card(lv_obj_t* parent, int x, int y, int w, int h) {
   lv_obj_set_style_bg_color(o, lv_color_hex(C_CARD), 0);
   lv_obj_set_style_border_color(o, lv_color_hex(C_LINE), 0);
   lv_obj_set_style_border_width(o, 1, 0);
-  lv_obj_set_style_radius(o, 20, 0);
+  lv_obj_set_style_radius(o, 24, 0);
   lv_obj_set_style_pad_all(o, 22, 0);
   lv_obj_remove_flag(o, LV_OBJ_FLAG_SCROLLABLE);
   return o;
@@ -67,10 +81,66 @@ static lv_obj_t* ui_label(lv_obj_t* parent, const char* text, const lv_font_t* f
   return l;
 }
 
+// A section heading: small spaced capitals
+static lv_obj_t* ui_heading(lv_obj_t* parent, const char* text) {
+  lv_obj_t* l = ui_label(parent, text, &lv_font_montserrat_16, C_DIM);
+  lv_obj_set_style_text_letter_space(l, 2, 0);
+  return l;
+}
+
+// A row's icon: the symbol in its colour on a tile of the same colour, faint
+static lv_obj_t* ui_icon(lv_obj_t* parent, const char* symbol, uint32_t color, int x, int y) {
+  lv_obj_t* t = lv_obj_create(parent);
+  lv_obj_set_size(t, 34, 34);
+  lv_obj_set_pos(t, x, y);
+  lv_obj_set_style_radius(t, 10, 0);
+  lv_obj_set_style_bg_color(t, lv_color_hex(color), 0);
+  lv_obj_set_style_bg_opa(t, LV_OPA_20, 0);
+  lv_obj_set_style_border_width(t, 0, 0);
+  lv_obj_set_style_pad_all(t, 0, 0);
+  lv_obj_remove_flag(t, (lv_obj_flag_t)(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
+  lv_obj_center(ui_label(t, symbol, &lv_font_montserrat_16, color));
+  return t;
+}
+
+// A setting's row: icon and name at y, the control (slider or switch) placed by the caller
+static void ui_row(lv_obj_t* parent, const char* symbol, uint32_t color, const char* name, int y) {
+  ui_icon(parent, symbol, color, 0, y);
+  lv_obj_t* l = ui_label(parent, name, &lv_font_montserrat_20, C_INK);
+  lv_obj_set_pos(l, 48, y + 6);
+}
+
+static lv_obj_t* ui_slider(lv_obj_t* parent, int y, int lo, int hi) {
+  lv_obj_t* s = lv_slider_create(parent);
+  lv_slider_set_range(s, lo, hi);
+  lv_obj_set_size(s, 176, 8);
+  lv_obj_align(s, LV_ALIGN_TOP_RIGHT, -8, y + 13);
+  lv_obj_set_ext_click_area(s, 20);
+  lv_obj_set_style_bg_color(s, lv_color_hex(C_LINE), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(s, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(s, lv_color_hex(C_ACCENT), LV_PART_INDICATOR);
+  lv_obj_set_style_bg_color(s, lv_color_hex(0xffffff), LV_PART_KNOB);
+  lv_obj_set_style_pad_all(s, 7, LV_PART_KNOB);                       // a 22 px knob on the 8 px track
+  lv_obj_set_style_outline_width(s, 0, LV_PART_KNOB | LV_STATE_FOCUSED);
+  return s;
+}
+
+static lv_obj_t* ui_switch(lv_obj_t* parent, int y) {
+  lv_obj_t* w = lv_switch_create(parent);
+  lv_obj_set_size(w, 68, 36);
+  lv_obj_align(w, LV_ALIGN_TOP_RIGHT, 0, y - 1);
+  lv_obj_set_style_bg_color(w, lv_color_hex(C_LINE), LV_PART_MAIN);
+  lv_obj_set_style_bg_color(w, lv_color_hex(C_ACCENT), LV_PART_INDICATOR | LV_STATE_CHECKED);
+  lv_obj_set_style_bg_color(w, lv_color_hex(0xffffff), LV_PART_KNOB);
+  return w;
+}
+
 static lv_obj_t* ui_button(lv_obj_t* parent, const char* text, lv_event_cb_t cb, bool primary) {
   lv_obj_t* b = lv_button_create(parent);
-  lv_obj_set_style_bg_color(b, lv_color_hex(primary ? C_ACCENT : C_LINE), 0);
-  lv_obj_set_style_radius(b, 16, 0);
+  lv_obj_set_style_bg_color(b, lv_color_hex(primary ? C_ACCENT : C_CARD2), 0);
+  lv_obj_set_style_border_color(b, lv_color_hex(C_LINE), 0);
+  lv_obj_set_style_border_width(b, primary ? 0 : 1, 0);
+  lv_obj_set_style_radius(b, LV_RADIUS_CIRCLE, 0);
   lv_obj_set_style_shadow_width(b, 0, 0);
   lv_obj_t* l = ui_label(b, text, &lv_font_montserrat_20, primary ? C_BG : C_INK);
   lv_obj_center(l);
@@ -96,7 +166,8 @@ static void ui_refresh_status() {
     lv_label_set_text(ui_addr, "-");
     lv_label_set_text(ui_hint, "Connect to WiFi, then run server/server.py on the PC.");
   }
-  lv_label_set_text(ui_pc, g_wifi != WIFI_UP ? "-" : "Paused while settings are open");
+  lv_label_set_text(ui_pc, g_wifi != WIFI_UP ? "Waiting for WiFi" : "Paused while settings are open");
+  lv_obj_set_style_bg_color(ui_pc_dot, lv_color_hex(g_wifi != WIFI_UP ? C_DIM : C_WARN), 0);
   char batt[128];
   battery_text(batt, sizeof(batt));
   if (strcmp(lv_label_get_text(ui_batt), batt)) lv_label_set_text(ui_batt, batt);
@@ -118,23 +189,34 @@ static void net_clicked(lv_event_t* e) {
   else ui_show_modal(g_nets[i].ssid, g_nets[i].secure);
 }
 
+// A network's row: rounded, the joined one tinted with the accent
+static void ui_list_row(lv_obj_t* b, bool current) {
+  lv_obj_set_height(b, 64);
+  lv_obj_set_flex_align(b, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_style_radius(b, 16, 0);
+  lv_obj_set_style_pad_hor(b, 16, 0);
+  lv_obj_set_style_border_width(b, 0, 0);
+  lv_obj_set_style_bg_color(b, lv_color_hex(current ? C_ACCENT : C_CARD), 0);
+  lv_obj_set_style_bg_opa(b, current ? LV_OPA_10 : LV_OPA_COVER, 0);
+  lv_obj_set_style_bg_color(b, lv_color_hex(C_CARD2), LV_STATE_PRESSED);
+  lv_obj_set_style_bg_opa(b, LV_OPA_COVER, LV_STATE_PRESSED);
+}
+
 static void ui_fill_list() {
   lv_obj_clean(ui_list);
   for (int i = 0; i < g_net_count; i++) {
     const Net& n = g_nets[i];
     const bool current = g_wifi == WIFI_UP && g_ssid == n.ssid;
     lv_obj_t* b = lv_list_add_button(ui_list, current ? LV_SYMBOL_OK : LV_SYMBOL_WIFI, n.ssid);
-    lv_obj_set_height(b, 64);
-    lv_obj_set_style_bg_color(b, lv_color_hex(C_CARD), 0);
+    ui_list_row(b, current);
     lv_obj_set_style_text_color(b, lv_color_hex(current ? C_ACCENT : C_INK), 0);
-    lv_obj_set_style_border_color(b, lv_color_hex(C_LINE), 0);
-    lv_obj_t* info = ui_label(b, "", &lv_font_montserrat_20, C_DIM);
-    lv_label_set_text_fmt(info, "%s, %s", signal_word(n.rssi), n.secure ? "secured" : "open");
+    lv_obj_t* info = ui_label(b, "", &lv_font_montserrat_20, current ? C_ACCENT : C_DIM);
+    if (current) lv_label_set_text(info, "Connected");
+    else lv_label_set_text_fmt(info, "%s, %s", signal_word(n.rssi), n.secure ? "secured" : "open");
     lv_obj_add_event_cb(b, net_clicked, LV_EVENT_CLICKED, (void*)(intptr_t)i);
   }
   lv_obj_t* other = lv_list_add_button(ui_list, LV_SYMBOL_PLUS, "Other network ...");
-  lv_obj_set_height(other, 64);
-  lv_obj_set_style_bg_color(other, lv_color_hex(C_CARD), 0);
+  ui_list_row(other, false);
   lv_obj_set_style_text_color(other, lv_color_hex(C_DIM), 0);
   lv_obj_add_event_cb(other, net_clicked, LV_EVENT_CLICKED, (void*)(intptr_t)-1);
 }
@@ -240,6 +322,7 @@ static lv_obj_t* ui_textarea(lv_obj_t* parent, const char* placeholder) {
   lv_obj_set_style_text_color(ta, lv_color_hex(C_INK), 0);
   lv_obj_set_style_border_color(ta, lv_color_hex(C_LINE), 0);
   lv_obj_set_style_border_color(ta, lv_color_hex(C_ACCENT), LV_STATE_FOCUSED);
+  lv_obj_set_style_radius(ta, 16, 0);
   lv_obj_add_event_cb(ta, [](lv_event_t* e) {   // the keyboard types into whichever field was tapped
     lv_obj_t* t = (lv_obj_t*)lv_event_get_target(e);
     lv_keyboard_set_textarea(ui_kb, t);
@@ -283,6 +366,7 @@ static void ui_build_modal(lv_obj_t* scr) {
   lv_obj_remove_flag(ui_modal, LV_OBJ_FLAG_SCROLLABLE);
 
   lv_obj_t* box = ui_card(ui_modal, 240, 24, 800, 340);
+  lv_obj_set_height(box, LV_SIZE_CONTENT);
   lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
   lv_obj_set_style_pad_row(box, 14, 0);
   ui_modal_title = ui_label(box, "", &lv_font_montserrat_28, C_INK);
@@ -338,6 +422,8 @@ static void ui_build_modal(lv_obj_t* scr) {
   lv_obj_set_size(ui_kb, SCR_W, 300);
   lv_obj_align(ui_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
   lv_obj_set_style_text_font(ui_kb, &lv_font_montserrat_28, 0);
+  lv_obj_set_style_bg_color(ui_kb, lv_color_hex(C_BG), 0);
+  lv_obj_set_style_radius(ui_kb, 12, LV_PART_ITEMS);
   lv_keyboard_set_map(ui_kb, LV_KEYBOARD_MODE_TEXT_LOWER, kb_lower, kb_ctrl);
   lv_keyboard_set_map(ui_kb, LV_KEYBOARD_MODE_TEXT_UPPER, kb_upper, kb_ctrl);
   lv_obj_add_event_cb(ui_kb, [](lv_event_t*) { ui_connect(); }, LV_EVENT_READY, nullptr);       // the keyboard's OK key
@@ -374,6 +460,8 @@ static void panel_open() {
   lv_slider_set_value(ui_kled, g_kled, LV_ANIM_OFF);
   if (g_rot == 3) lv_obj_add_state(ui_flip, LV_STATE_CHECKED);
   else lv_obj_remove_state(ui_flip, LV_STATE_CHECKED);
+  if (g_scroll_rev) lv_obj_add_state(ui_srev, LV_STATE_CHECKED);
+  else lv_obj_remove_state(ui_srev, LV_STATE_CHECKED);
   ui_refresh_status();
   ui_fill_list();
   lv_obj_invalidate(lv_screen_active());
@@ -401,6 +489,23 @@ static void ui_setup() {
   lv_indev_t* indev = lv_indev_create();
   lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
   lv_indev_set_read_cb(indev, ui_touch);
+  static lv_image_dsc_t arrow = {};
+  arrow.header.magic = LV_IMAGE_HEADER_MAGIC;
+  arrow.header.cf = LV_COLOR_FORMAT_RGB565A8;
+  arrow.header.w = PTR_W;
+  arrow.header.h = PTR_H;
+  arrow.header.stride = PTR_W * 2;
+  arrow.data_size = sizeof(g_ptr_lv);
+  arrow.data = g_ptr_lv;
+  lv_indev_t* mouse = lv_indev_create();
+  lv_indev_set_type(mouse, LV_INDEV_TYPE_POINTER);
+  lv_indev_set_read_cb(mouse, ui_mouse);
+  lv_obj_t* cursor = lv_image_create(lv_layer_sys());
+  lv_image_set_src(cursor, &arrow);
+  lv_obj_set_style_translate_x(cursor, -PTR_HOT, 0);   // the tip on the point
+  lv_obj_set_style_translate_y(cursor, -PTR_HOT, 0);
+  lv_obj_add_flag(cursor, LV_OBJ_FLAG_HIDDEN);
+  lv_indev_set_cursor(mouse, cursor);
 
   lv_obj_t* scr = lv_screen_active();
   lv_obj_set_style_bg_color(scr, lv_color_hex(C_BG), 0);
@@ -419,65 +524,68 @@ static void ui_setup() {
   lv_obj_t* st = ui_card(scr, 32, 80, 410, 300);
   lv_obj_set_flex_flow(st, LV_FLEX_FLOW_COLUMN);
   lv_obj_set_style_pad_row(st, 6, 0);
-  ui_label(st, "WI-FI", &lv_font_montserrat_20, C_DIM);
+  ui_heading(st, "WI-FI");
   ui_wifi = ui_label(st, "", &lv_font_montserrat_20, C_INK);
   lv_label_set_long_mode(ui_wifi, LV_LABEL_LONG_DOT);
   lv_obj_set_width(ui_wifi, lv_pct(100));
-  lv_obj_t* h2 = ui_label(st, "ADDRESS", &lv_font_montserrat_20, C_DIM);
+  lv_obj_t* h2 = ui_heading(st, "ADDRESS");
   lv_obj_set_style_margin_top(h2, 10, 0);
   ui_addr = ui_label(st, "", &lv_font_montserrat_28, C_ACCENT);
-  lv_obj_t* h3 = ui_label(st, "PC", &lv_font_montserrat_20, C_DIM);
+  lv_obj_t* h3 = ui_heading(st, "PC");
   lv_obj_set_style_margin_top(h3, 10, 0);
-  ui_pc = ui_label(st, "", &lv_font_montserrat_20, C_INK);
+  lv_obj_t* pc = lv_obj_create(st);   // a dot for the state, and the words
+  lv_obj_set_size(pc, lv_pct(100), LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_opa(pc, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(pc, 0, 0);
+  lv_obj_set_style_pad_all(pc, 0, 0);
+  lv_obj_remove_flag(pc, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_flex_flow(pc, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(pc, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_style_pad_column(pc, 10, 0);
+  ui_pc_dot = lv_obj_create(pc);
+  lv_obj_set_size(ui_pc_dot, 10, 10);
+  lv_obj_set_style_radius(ui_pc_dot, LV_RADIUS_CIRCLE, 0);
+  lv_obj_set_style_border_width(ui_pc_dot, 0, 0);
+  ui_pc = ui_label(pc, "", &lv_font_montserrat_20, C_INK);
   ui_hint = ui_label(st, "", &lv_font_montserrat_20, C_DIM);
   lv_obj_set_style_margin_top(ui_hint, 10, 0);
   lv_label_set_long_mode(ui_hint, LV_LABEL_LONG_WRAP);
   lv_obj_set_width(ui_hint, lv_pct(100));
 
   // display
-  lv_obj_t* dc = ui_card(scr, 32, 392, 410, 222);
-  lv_obj_t* bl = ui_label(dc, "Brightness", &lv_font_montserrat_20, C_INK);
-  lv_obj_set_pos(bl, 0, 4);
-  ui_bri = lv_slider_create(dc);
-  lv_slider_set_range(ui_bri, 10, 255);
-  lv_obj_set_size(ui_bri, 210, 16);
-  lv_obj_set_pos(ui_bri, 150, 8);
-  lv_obj_set_ext_click_area(ui_bri, 20);
+  lv_obj_t* dc = ui_card(scr, 32, 390, 410, 226);   // rows 39 apart
+  lv_obj_set_style_pad_ver(dc, 16, 0);
+  lv_obj_set_style_pad_hor(dc, 20, 0);
+  ui_row(dc, LV_SYMBOL_EYE_OPEN, C_SUN, "Brightness", 0);
+  ui_bri = ui_slider(dc, 0, 10, 255);
   lv_obj_add_event_cb(ui_bri, [](lv_event_t*) {
     g_bri = (uint8_t)lv_slider_get_value(ui_bri);
     M5.Display.setBrightness(g_bri);
   }, LV_EVENT_VALUE_CHANGED, nullptr);
   lv_obj_add_event_cb(ui_bri, [](lv_event_t*) { prefs.putUChar("bri", g_bri); }, LV_EVENT_RELEASED, nullptr);
-  lv_obj_t* vl = ui_label(dc, "Volume", &lv_font_montserrat_20, C_INK);
-  lv_obj_set_pos(vl, 0, 48);
-  ui_vol = lv_slider_create(dc);
-  lv_slider_set_range(ui_vol, 0, 255);
-  lv_obj_set_size(ui_vol, 210, 16);
-  lv_obj_set_pos(ui_vol, 150, 52);
-  lv_obj_set_ext_click_area(ui_vol, 20);
+  ui_row(dc, LV_SYMBOL_VOLUME_MAX, C_ROSE, "Volume", 39);
+  ui_vol = ui_slider(dc, 39, 0, 255);
   lv_obj_add_event_cb(ui_vol, [](lv_event_t*) { set_volume((uint8_t)lv_slider_get_value(ui_vol), false); },
                       LV_EVENT_VALUE_CHANGED, nullptr);
   lv_obj_add_event_cb(ui_vol, [](lv_event_t*) {   // save, and let the new level be heard
     prefs.putUChar("vol", g_vol);
     set_volume(g_vol, true);
   }, LV_EVENT_RELEASED, nullptr);
-  lv_obj_t* kl = ui_label(dc, "Key lights", &lv_font_montserrat_20, C_INK);   // the keyboard's; off at the left end
-  lv_obj_set_pos(kl, 0, 92);
-  ui_kled = lv_slider_create(dc);
-  lv_slider_set_range(ui_kled, 0, 100);
-  lv_obj_set_size(ui_kled, 210, 16);
-  lv_obj_set_pos(ui_kled, 150, 96);
-  lv_obj_set_ext_click_area(ui_kled, 20);
+  ui_row(dc, LV_SYMBOL_KEYBOARD, C_VIOLET, "Key lights", 78);   // the keyboard's; off at the left end
+  ui_kled = ui_slider(dc, 78, 0, 100);
   lv_obj_add_event_cb(ui_kled, [](lv_event_t*) { kbd_set_light((uint8_t)lv_slider_get_value(ui_kled)); },
                       LV_EVENT_VALUE_CHANGED, nullptr);
   lv_obj_add_event_cb(ui_kled, [](lv_event_t*) { prefs.putUChar("kled", g_kled); }, LV_EVENT_RELEASED, nullptr);
-  lv_obj_t* fl = ui_label(dc, "Flip screen 180°", &lv_font_montserrat_20, C_INK);
-  lv_obj_set_pos(fl, 0, 136);
-  ui_flip = lv_switch_create(dc);
-  lv_obj_set_size(ui_flip, 84, 44);
-  lv_obj_align(ui_flip, LV_ALIGN_TOP_RIGHT, 0, 126);
+  ui_row(dc, LV_SYMBOL_LOOP, C_SKY, "Flip screen 180°", 117);
+  ui_flip = ui_switch(dc, 117);
   lv_obj_add_event_cb(ui_flip, [](lv_event_t*) {
     set_rotation(lv_obj_has_state(ui_flip, LV_STATE_CHECKED) ? 3 : 1);
+  }, LV_EVENT_VALUE_CHANGED, nullptr);
+  ui_row(dc, LV_SYMBOL_SHUFFLE, C_ACCENT, "Reverse scrolling", 156);   // a USB mouse's wheel
+  ui_srev = ui_switch(dc, 156);
+  lv_obj_add_event_cb(ui_srev, [](lv_event_t*) {
+    g_scroll_rev = lv_obj_has_state(ui_srev, LV_STATE_CHECKED);
+    prefs.putBool("srev", g_scroll_rev);
   }, LV_EVENT_VALUE_CHANGED, nullptr);
 
   lv_obj_t* done = ui_button(scr, "Done", [](lv_event_t*) { panel_close(); }, true);
@@ -500,6 +608,7 @@ static void ui_setup() {
   lv_obj_set_style_bg_color(ui_list, lv_color_hex(C_CARD), 0);
   lv_obj_set_style_border_width(ui_list, 0, 0);
   lv_obj_set_style_pad_all(ui_list, 0, 0);
+  lv_obj_set_style_pad_row(ui_list, 4, 0);
   lv_obj_set_style_text_font(ui_list, &lv_font_montserrat_28, 0);
 
   ui_build_modal(scr);
