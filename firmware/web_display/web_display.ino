@@ -70,9 +70,9 @@ static constexpr int EDGE = 40, SWIPE_IN = 120;           // edge swipe: start w
 static constexpr int64_t SWIPE_MS = 700;
 static constexpr int SWIPE3 = 150;                    // three fingers moved this far sideways: back / forward
 
-enum : uint8_t { EV_DOWN = 1, EV_MOVE = 2, EV_UP = 3, EV_SHOWN = 5, EV_HELLO = 6, EV_LANES = 7, EV_NUDGE = 8, EV_KEY = 9, EV_GESTURE = 10, EV_MOUSE = 11 };
+enum : uint8_t { EV_DOWN = 1, EV_MOVE = 2, EV_UP = 3, EV_SHOWN = 5, EV_HELLO = 6, EV_LANES = 7, EV_NUDGE = 8, EV_KEY = 9, EV_GESTURE = 10, EV_MOUSE = 11, EV_PIECE = 12 };
 enum : uint8_t { GEST_LEFT = 1, GEST_RIGHT = 2, GEST_BOTTOM = 3, GEST_THREE_RIGHT = 4, GEST_THREE_LEFT = 5 };
-enum : uint8_t { HELLO_SOUND = 1, HELLO_STRIPS = 2, HELLO_FLIPPED = 4 };   // hello flags
+enum : uint8_t { HELLO_SOUND = 1, HELLO_STRIPS = 2, HELLO_FLIPPED = 4, HELLO_UDP = 8 };   // hello flags
 
 #pragma pack(push, 1)
 struct RectHeader { char magic[4]; uint16_t x, y, w, h; uint32_t len; };
@@ -264,10 +264,16 @@ static void send_event(uint8_t type, int x, int y, uint8_t flags = 0, uint16_t z
 }
 
 #include "lanes.h"
+#include "udp_stream.h"
+
+// a piece that came over UDP (udp_stream.h), read in place of the TCP stream while it is drawn
+static const uint8_t* g_mem = nullptr;
+static uint32_t g_mem_len = 0, g_mem_pos = 0, g_mem_seq = 0;
 
 static void drop_client() {
   ptr_erase();
   lanes_close();
+  udp_stop();
   if (g_have_client) g_client.stop();
   g_have_client = g_shown_any = false;
   g_pc_ip = 0;
@@ -275,6 +281,12 @@ static void drop_client() {
 }
 
 static bool read_exact(uint8_t* p, size_t n) {
+  if (g_mem) {
+    if (g_mem_pos + n > g_mem_len) return false;
+    memcpy(p, g_mem + g_mem_pos, n);
+    g_mem_pos += n;
+    return true;
+  }
   if (g_lanes_on) return lanes_read(p, n);
   size_t got = 0;
   const int64_t deadline = now_ms() + 3000;
@@ -347,6 +359,7 @@ static bool handle_rect() {
     g_multitouch = h.y & 1;
     g_gestures = h.y & 2;
     g_mouse_pc = h.y & 4;
+    if (h.y & 8) udp_start();
     Serial.printf("PC: WiFi power save %s, %s%s%s\n", g_power_mode ? "off" : "auto", g_multitouch ? "multi-touch" : "one finger",
                   g_gestures ? ", gestures" : "", g_mouse_pc ? ", mouse" : "");
     return true;
@@ -367,7 +380,7 @@ static bool handle_rect() {
     g_last_update = now;
     g_stats.updates++;
     g_shown_any = true;
-    send_event(EV_SHOWN, g_pace.shown_x, 0);   // (x: firmware 1.3.2, timed updates)
+    send_event(EV_SHOWN, g_pace.shown_x, g_mem ? g_mem_seq & 0xFFFF : 0, 0, g_mem ? g_mem_seq >> 16 : 0);   // (x: firmware 1.3.2, timed updates; y, z: UDP)
     g_pace.shown_x = 0;
     g_update_done = true;
     return true;
@@ -401,6 +414,8 @@ static bool handle_rect() {
   return true;
 }
 
+static void udp_poll();
+
 static void pc_poll() {
   WiFiClient incoming = g_server.accept();
   if (incoming) {
@@ -413,7 +428,7 @@ static void pc_poll() {
     g_pace = {};
     g_pc_ip = (uint32_t)g_client.remoteIP();
     Serial.printf("PC connected from %s\n", g_client.remoteIP().toString().c_str());
-    send_event(EV_HELLO, 1, 4, HELLO_SOUND | HELLO_STRIPS | (g_rot == 3 ? HELLO_FLIPPED : 0), 0);   // version 1.4.0
+    send_event(EV_HELLO, 1, 4, HELLO_SOUND | HELLO_STRIPS | HELLO_UDP | (g_rot == 3 ? HELLO_FLIPPED : 0), 0);   // version 1.4.0
     lanes_offer();
   }
   if (!g_have_client) return;
@@ -442,7 +457,7 @@ static void pc_poll() {
   // a nudge follows every event within 20 ms: a lost one is then followed by others, the PC answers with
   // duplicate acks, and lwIP resends it at once.
   const int64_t now = now_ms();
-  if (g_lanes_on && now - g_event_sent >= 20 && (now - g_last_update < 500 || now - g_last_touch < 500))
+  if ((g_lanes_on || g_udp_on) && now - g_event_sent >= 20 && (now - g_last_update < 500 || now - g_last_touch < 500))
     send_event(EV_NUDGE, 0, 0);
   g_update_done = false;
   while (!g_update_done && (g_lanes_on ? lanes_ready() : g_client.available() >= (int)sizeof(RectHeader))) {
@@ -454,6 +469,48 @@ static void pc_poll() {
     }
     if (!handle_rect()) { g_client.stop(); break; }
   }
+  if (g_udp_on && !g_update_done) udp_poll();
+}
+
+// The UDP stream (udp_stream.h): acknowledge the pieces that came in, then draw the next update whole when it's time.
+static void udp_poll() {
+  static uint32_t stamped = 0;      // seq of the piece whose "TPTS" was taken (+1; 0: none)
+  const uint32_t wr = g_uwr.load();
+  for (; g_uack != wr; g_uack++) {
+    const uint32_t seq = g_uq[g_uack % UDP_QUEUE].seq;
+    send_event(EV_PIECE, seq & 0xFFFF, seq >> 16);
+  }
+  const uint32_t rd = g_urd.load();
+  if (rd == wr) return;
+  uint32_t end = rd;                // the head update: up to its last piece
+  bool whole = false;
+  while (end != wr && !whole) whole = g_uq[end++ % UDP_QUEUE].last;
+  const int64_t now = now_ms();
+  if (!whole && now - g_uq[(wr - 1) % UDP_QUEUE].at < UDP_HOLD_MS) return;   // the rest may still be coming
+  const UdpPiece& first = g_uq[rd % UDP_QUEUE];
+  const bool timed = first.len >= sizeof(RectHeader) && memcmp(g_uring + first.off, "TPTS", 4) == 0;
+  if (timed && stamped != first.seq + 1) {
+    RectHeader h;
+    memcpy(&h, g_uring + first.off, sizeof(h));
+    pace_stamp(h);
+    stamped = first.seq + 1;
+  }
+  if (g_pace.due_on) {              // a timed update: wait for its turn
+    if (now < g_pace.due && now - g_last_touch > PACE_TOUCH_MS) return;
+    g_pace.due_on = false;
+    g_pace.shown_x = 1 + (uint16_t)constrain(now - g_pace.due, (int64_t)0, (int64_t)60000);
+  }
+  for (uint32_t i = rd; i != end; i++) {
+    const UdpPiece& u = g_uq[i % UDP_QUEUE];
+    g_mem = g_uring + u.off; g_mem_len = u.len; g_mem_seq = u.seq;
+    g_mem_pos = i == rd && timed ? sizeof(RectHeader) : 0;
+    while (g_mem_pos < g_mem_len)
+      if (!handle_rect()) { Serial.printf("ERR udp piece %u\n", (unsigned)u.seq); break; }
+    g_mem = nullptr;
+    g_urd.fetch_add(1);
+  }
+  g_pace.due_on = false;   // (two updates drawn together, the first's last piece lost: the second's "TPTS" is spent)
+  g_update_done = true;
 }
 
 // ---- WiFi ---------------------------------------------------------------------------------------------------
@@ -743,6 +800,12 @@ static void print_stats() {
                 (unsigned)g_ustats.mouse_reports, g_ptr.drawn ? "drawn" : g_ptr.shown ? "shown" : "hidden", g_ptr.x, g_ptr.y,
                 (unsigned)g_ptr_stats.draws, (unsigned)g_ptr_stats.patches, g_ptr.simd ? "PIE" : "C");
   g_ptr_stats = {};
+  Serial.printf("boot | reset reason %d, up %lld s\n", (int)esp_reset_reason(), now_ms() / 1000);   // EXPERIMENT
+  const UdpStats us = g_ustat;
+  g_ustat = {};
+  if (g_udp_on) Serial.printf("udp | datagrams %u | pieces %u, lost %u (incomplete), late %u, no slot %u, bad %u\n",
+                              (unsigned)us.datagrams, (unsigned)us.pieces, (unsigned)us.lost, (unsigned)us.late,
+                              (unsigned)us.full, (unsigned)us.bad);
   const LaneStats ls = g_lstats;
   g_lstats = {};
   Serial.printf("lanes | %d in use | chunks %u | waited for data %u times, %u ms (lanes %u/%u), longest %u ms | longest idle %u ms on lane %u, others holding %u bytes\n", g_lanes_on,
@@ -865,6 +928,7 @@ void setup() {
   cfg.internal_spk = true;   // configured here, switched on only while sound plays (audio.h)
   M5.begin(cfg);
   Serial.printf("\nTab5 Web Display %s\n", FIRMWARE_VERSION);
+  Serial.printf("reset reason %d (1 power on, 3 sw, 4 panic, 5 int wdt, 6 task wdt, 7 other wdt, 9 brownout)\n", (int)esp_reset_reason());   // EXPERIMENT
   prefs.begin("webdisp", false);
   // The rotation the flip switch saved, or with none saved, upright for how the Tab5 is likely held: docked in
   // M5Stack's keyboard, that is flipped (as in M5Stack's own keyboard examples).

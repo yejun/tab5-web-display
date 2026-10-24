@@ -83,10 +83,11 @@ TOUCH_QUIET_S = 0.5   # ... but only one in flight this soon after a touch, wher
 RECT = struct.Struct("<4sHHHHI")   # "TAB5" (or "TABS", a strip), x, y, w, h, jpeg length
 EVENT = struct.Struct("<BBHHH")    # type, flags, x, y, z
 EV_DOWN, EV_MOVE, EV_UP, EV_SHOWN, EV_HELLO, EV_LANES, EV_KEY, EV_GESTURE, EV_MOUSE = 1, 2, 3, 5, 6, 7, 9, 10, 11
+EV_PIECE = 12
 # Gestures (firmware 1.3, when asked for): swipes in from the left / right / bottom edge (the top one opens the Tab5's
 # settings), and three fingers swiped right / left. They switch and close tabs, and go back and forward.
 GEST_LEFT, GEST_RIGHT, GEST_BOTTOM, GEST_THREE_RIGHT, GEST_THREE_LEFT = 1, 2, 3, 4, 5
-TCFG_MULTITOUCH, TCFG_GESTURES, TCFG_MOUSE = 1, 2, 4
+TCFG_MULTITOUCH, TCFG_GESTURES, TCFG_MOUSE, TCFG_UDP = 1, 2, 4, 8
 # A USB mouse on the Tab5 (firmware 1.4, when asked for): EV_MOUSE carries the pointer in x, y, the buttons held in
 # flags bits 0-4 (left, right, middle, back, forward: the same bits as CDP's "buttons"), Ctrl / Shift / Alt in bits 5-7,
 # and the wheel's steps since the last event in z (low byte, int8, + = up), the horizontal wheel's in the high byte.
@@ -128,7 +129,7 @@ LANE_HDR = struct.Struct("<II")    # chunk sequence number, length
 LANE_CHUNK = 16384
 LANE_OVERDUE_S = 0.15
 LANE_OFFER, LANE_ACCEPTED, LANE_REFUSED = 0, 1, 2
-HELLO_SOUND, HELLO_STRIPS, HELLO_FLIPPED = 1, 2, 4
+HELLO_SOUND, HELLO_STRIPS, HELLO_FLIPPED, HELLO_UDP = 1, 2, 4, 8
 AUDIO = struct.Struct("<4sIHH")    # "TAUD", stream position of the first frame, frames, 0
 AUDIO_RATE, AUDIO_FRAMES = 48000, 360   # 7.5 ms of 16-bit stereo per datagram: 1440 bytes, one WiFi frame
 AUDIO_TAIL_S = 0.5                 # keep sending this long into silence, so a short pause doesn't restart the stream
@@ -372,6 +373,101 @@ def keepalive(writer):
             sock.setsockopt(socket.IPPROTO_TCP, opt, val)
 
 
+# EXPERIMENT (udp-experiment branch, --udp; firmware with udp_stream.h): the update stream as UDP datagrams instead
+# of TCP. Each piece (a rectangle or strip with its JPEG, the last one with the end marker) goes out as datagrams
+# { "TUDP", u32 seq, u16 frag, u16 frags, u32 len } + UDP_CHUNK bytes; the Tab5 applies whole pieces in order and
+# acknowledges each as it arrives (event 12). A piece is lost when a later one is acknowledged first, or none is
+# within UDP_ACK_S; its tiles are then sent again in the next update. "TUDQ" marks an update's last piece: the Tab5
+# draws an update whole, when it is due if timed ("TPTS" in front of its first piece), and its "shown" names the
+# seq of that last piece. Datagrams are paced: the rate creeps up while nothing is lost
+# and drops by UDP_BACKOFF on a loss (at most once per UDP_BACKOFF_S), so a WiFi hold-up isn't met with a flood.
+UDP_PORT, UDP_CHUNK = 8768, 1400
+UDP_HDR = struct.Struct("<4sIHHI")
+UDP_ACK_S = 0.25
+UDP_RATE_MIN, UDP_RATE_MAX = 0.5e6, 8e6
+UDP_BACKOFF, UDP_BACKOFF_S, UDP_GROW = 0.7, 0.1, 0.05e6   # x0.7 on a loss; +50 KB/s every 50 ms without one
+UDP_BURST = 8 * UDP_CHUNK
+
+
+class UdpSender:
+    """Sends pieces as paced datagrams from a thread of its own (a token bucket at self.rate bytes/s)."""
+
+    def __init__(self, host, rate, loop, on_sent):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1 << 22)
+        self.sock.connect((host, UDP_PORT))
+        self.rate, self.loop, self.on_sent = rate, loop, on_sent
+        self.queue, self.cv, self.running = collections.deque(), threading.Condition(), True
+        self.last_backoff = self.busy_at = 0.0   # the last back-off; when datagrams last had to wait their turn
+        self.sent_bytes = 0                       # datagram bytes handed to the network (for the stats)
+        threading.Thread(target=self.run, daemon=True).start()
+
+    def put(self, seq, payload, last):
+        frags = (len(payload) + UDP_CHUNK - 1) // UDP_CHUNK
+        grams = [UDP_HDR.pack(b"TUDQ" if last else b"TUDP", seq & 0xFFFFFFFF, i, frags, len(payload)) + payload[i * UDP_CHUNK:(i + 1) * UDP_CHUNK]
+                 for i in range(frags)]
+        with self.cv:
+            self.queue.append((seq, grams))
+            self.cv.notify()
+
+    def backoff(self):
+        now = time.monotonic()
+        if now - self.last_backoff >= UDP_BACKOFF_S:
+            self.rate = max(UDP_RATE_MIN, self.rate * UDP_BACKOFF)
+            self.last_backoff = now
+
+    def grow(self):
+        """Only while the rate is what holds datagrams back: idle, it says nothing about the link."""
+        now = time.monotonic()
+        if now - self.last_backoff > 0.2 and now - self.busy_at < 0.1:
+            self.rate = min(UDP_RATE_MAX, self.rate + UDP_GROW)
+
+    def run(self):
+        tokens, last = 0.0, time.perf_counter()
+        while self.running:
+            with self.cv:
+                while not self.queue and self.running:
+                    self.cv.wait(0.5)
+                if not self.running:
+                    return
+                seq, grams = self.queue.popleft()
+            for g in grams:
+                while True:
+                    now = time.perf_counter()
+                    tokens, last = min(tokens + (now - last) * self.rate, UDP_BURST), now
+                    if tokens >= len(g):
+                        tokens -= len(g)
+                        break
+                    self.busy_at = time.monotonic()
+                    time.sleep((len(g) - tokens) / self.rate)
+                try:
+                    self.sock.send(g)
+                    self.sent_bytes += len(g)
+                except OSError:
+                    pass
+            self.loop.call_soon_threadsafe(self.on_sent, seq, time.monotonic())
+
+    def close(self):
+        self.running = False
+        with self.cv:
+            self.cv.notify()
+        self.sock.close()
+
+
+def split_piece(piece, parts, sub):
+    """A plan() piece cut into about `parts` pieces: column groups (rows for a rect taller than wide), 16 px
+    multiples, at least 48 px across for 4:2:0."""
+    kind, x, y, w, h = piece
+    least = 3 if sub else 1
+    if kind == "rect" and h > w:
+        n = max(1, min(parts, h // TILE // least))
+        cuts = [y + (h // TILE) * i // n * TILE for i in range(n + 1)]
+        return [(kind, x, a, w, b - a) for a, b in zip(cuts, cuts[1:])]
+    n = max(1, min(parts, w // TILE // least))
+    cuts = [x + (w // TILE) * i // n * TILE for i in range(n + 1)]
+    return [(kind, a, y, b - a, h) for a, b in zip(cuts, cuts[1:])]
+
+
 class AudioOut:
     """Sends 48 kHz stereo 16-bit PCM to the Tab5 as UDP datagrams of AUDIO_FRAMES frames each."""
 
@@ -504,6 +600,13 @@ class Mirror:
         self.lane_offer, self.lane_answer, self.lane_answered = None, None, asyncio.Event()
         self.lanes, self.lane_readers, self.seq = [], [], 0   # lane writers, and the next chunk's number
         self.lanes_broken = False      # a lane setup failed: don't try again in this run
+        self.udp = None                # UdpSender while the stream goes over UDP (--udp)
+        self.useq = 0                  # the next piece's number
+        self.uflight = collections.deque()   # UDP: the last piece of each update in in_flight
+        self.upieces = collections.OrderedDict()   # seq -> [tile slice, last of its update, sent at or None]
+        self.tile_seq = np.full((H // TILE, W // TILE), -1, np.int64)   # the piece that last carried each tile
+        self.lost_tiles = np.zeros((H // TILE, W // TILE), bool)        # to be sent again
+        self.ustats = [0, 0, 0]        # pieces sent, lost, tiles resent this second
         self.vq = float(MOTION_Q_BIG)  # quality of large motion, adapted to the link
         self.rate = ADAPT_RATE0        # estimated link rate, bytes/s
         self.frames_in, self.fps_in = 0, 30.0   # new frames from the source this second, and per second
@@ -819,7 +922,7 @@ class Mirror:
                     sound = "with sound" if self.audio and self.audio.target else "no sound"
                     print(f"showing on Tab5 {self.host}:{PORT} (firmware {fw}, {sound})")
                     check_firmware(self.firmware)
-                if self.in_flight:
+                if self.in_flight and not self.udp:
                     sent_at, touch_t, show, size = self.in_flight.popleft()
                     if show is not None:
                         self.timed_shown += 1
@@ -830,7 +933,25 @@ class Mirror:
                     self.shown_at.append(now)
                     if touch_t is not None:
                         print(f"touch->shown {1000 * (now - touch_t):4.0f} ms")
+                if self.udp:   # drawn: the update ending with piece y | z << 16 (and any before it, not shown whole)
+                    seq = y | _z << 16
+                    while self.uflight and self.uflight[0] <= seq:
+                        last = self.uflight.popleft()
+                        sent_at, touch_t, show, size = self.in_flight.popleft()
+                        if last != seq:
+                            continue
+                        if show is not None:
+                            self.timed_shown += 1
+                            self.timed_bytes += size
+                            self.timed_late += x > 1 + PACED_LATE_MS
+                        now = time.monotonic()
+                        self.show_times.append(now - sent_at)
+                        self.shown_at.append(now)
+                        if touch_t is not None:
+                            print(f"touch->shown {1000 * (now - touch_t):4.0f} ms")
                 self.acked.set()
+            elif kind == EV_PIECE:
+                self.udp_acked(x | y << 16)
             elif kind in (EV_DOWN, EV_MOVE, EV_UP):
                 self.queue_touch(kind, flags, x, y)
             elif kind == EV_GESTURE:
@@ -853,7 +974,10 @@ class Mirror:
                     self.lane_answer = flags
                     self.lane_answered.set()
             elif kind == EV_HELLO:   # firmware 1.1 or later: it takes settings and can play sound
-                self.writer.write(RECT.pack(b"TCFG", POWER_SAVE[self.args.power_save], self.multitouch * TCFG_MULTITOUCH | self.gestures * TCFG_GESTURES | self.mouse * TCFG_MOUSE, 0, 0, 0))
+                self.writer.write(RECT.pack(b"TCFG", POWER_SAVE[self.args.power_save], self.multitouch * TCFG_MULTITOUCH | self.gestures * TCFG_GESTURES | self.mouse * TCFG_MOUSE | (TCFG_UDP if self.args.udp and flags & HELLO_UDP else 0), 0, 0, 0))
+                if self.args.udp and flags & HELLO_UDP and not self.udp:
+                    self.udp = UdpSender(self.host, self.args.udp_rate * 1e6, asyncio.get_running_loop(), self.udp_sent)
+                    print(f"stream over UDP, pieces of at most {self.args.udp_piece or 'any number of'} datagrams")
                 if self.audio and flags & HELLO_SOUND:
                     self.audio.target = (self.host, PORT)
                 self.strips, self.flipped = bool(flags & HELLO_STRIPS), bool(flags & HELLO_FLIPPED)
@@ -872,7 +996,13 @@ class Mirror:
         self.strips = self.flipped = False
         self.firmware = None
         self.lane_offer, self.lanes, self.seq = None, [], 0
+        self.udp, self.useq = None, 0
+        self.upieces.clear()
+        self.uflight.clear()
+        self.tile_seq[:] = -1
+        self.lost_tiles[:] = False
         events = asyncio.create_task(self.read_events(reader))
+        watcher = asyncio.create_task(self.udp_watch())
         toucher = asyncio.create_task(self.dispatch_inputs())
         prev, last_start, last_sent, needs_settle = None, 0.0, 0.0, False
         rough = np.zeros((H // TILE, W // TILE), bool)  # tiles last sent below the top quality
@@ -881,10 +1011,10 @@ class Mirror:
         stats, stats_t = [], time.monotonic()
         try:
             while not events.done():
-                if self.lane_offer and not self.lanes and self.args.lanes > 1 and not self.lanes_broken:
+                if self.lane_offer and not self.lanes and self.args.lanes > 1 and not self.lanes_broken and not self.args.udp:
                     await self.open_lanes(host)
                 # (one connection can't hold frames ahead: its 64 KB window would stall the stream)
-                timed = self.paced and not self.args.no_pacing and bool(self.lanes) and (self.firmware or (0,)) >= (1, 3, 2)
+                timed = self.paced and not self.args.no_pacing and (bool(self.lanes) or bool(self.udp)) and (self.firmware or (0,)) >= (1, 3, 2)
                 if timed != self.timed:
                     self.timed = timed
                     self.set_lead(VIDEO_LEAD_S if timed else 0.0)
@@ -912,6 +1042,10 @@ class Mirror:
                 def diff_and_encode():   # in a worker thread, so touches, acks and sound keep flowing meanwhile
                     work[0] = time.monotonic()
                     tiles = changed_tiles(prev, cur, exact=settle)
+                    if self.udp and self.lost_tiles.any():   # lost on the way: send again
+                        self.ustats[2] += int((self.lost_tiles & ~tiles).sum())
+                        tiles |= self.lost_tiles
+                        self.lost_tiles[:] = False
                     changed_at[tiles] = t0
                     # Moving: changed in the last MOTION_S, not only now. Smooth or dark footage changes many tiles
                     # by less than the noise threshold in any one frame; judged by one frame, a video strip counted as
@@ -938,17 +1072,29 @@ class Mirror:
                             still = np.zeros_like(still)
                             still[ys[oldest], xs[oldest]] = True
                         pieces += [(piece, top, 0) for piece in plan(still, self.strips)]
-                    out = bytearray()
+                    out, parts, done = bytearray(), [], []   # parts and done: each piece's record, and the piece
+                    cap = self.args.udp_piece * UDP_CHUNK if self.udp and self.args.udp_piece else 0
                     for piece, q, sub in pieces:
-                        px = piece_pixels(cur, piece, self.flipped)
-                        jpg = encode(px, q, sub)
-                        while len(jpg) > JPEG_MAX and q > JPEG_MAX_Q_MIN:   # (left counted as sent at q: no refining)
-                            q = max(q - 15, JPEG_MAX_Q_MIN)
+                        todo = [piece]
+                        while todo:
+                            pc = todo.pop(0)
+                            px = piece_pixels(cur, pc, self.flipped)
                             jpg = encode(px, q, sub)
-                        out += RECT.pack(b"TABS" if piece[0] == "strip" else b"TAB5", *piece[1:], len(jpg)) + jpg
+                            while len(jpg) > JPEG_MAX and q > JPEG_MAX_Q_MIN:   # (left counted as sent at q: no refining)
+                                q = max(q - 15, JPEG_MAX_Q_MIN)
+                                jpg = encode(px, q, sub)
+                            if cap and pc is piece and len(jpg) > cap:   # UDP: cut into pieces of about cap
+                                cut = split_piece(pc, -(-len(jpg) // max(cap - 700, 700)), sub)
+                                if len(cut) > 1:
+                                    todo = cut + todo
+                                    continue
+                            rec = RECT.pack(b"TABS" if pc[0] == "strip" else b"TAB5", *pc[1:], len(jpg)) + jpg
+                            out += rec
+                            parts.append(rec)
+                            done.append((pc, q, sub))
                     work[1] = time.monotonic()
-                    return pieces, out
-                pieces, out = await asyncio.to_thread(diff_and_encode)
+                    return done, out, parts
+                pieces, out, parts = await asyncio.to_thread(diff_and_encode)
                 t2 = time.monotonic()
                 if moving and pieces:
                     self.encoded(len(out), changed[0])
@@ -981,7 +1127,12 @@ class Mirror:
                         show = due + VIDEO_AV_S
                         p, lead = int(show * 1000) & 0xFFFFFFFF, max(-32768, min(32767, int((show - t_send) * 1000)))
                         out = RECT.pack(b"TPTS", p & 0xFFFF, p >> 16, lead & 0xFFFF, 0, 0) + out
-                    await self.send(out)
+                        if self.udp:
+                            parts[0] = out[:RECT.size] + parts[0]
+                    if self.udp:
+                        self.udp_send(parts, pieces)
+                    else:
+                        await self.send(out)
                     t_sent = time.monotonic()
                     last_sent = t0
                     # remember only what the Tab5 now shows, so sub-threshold drift still adds up and gets sent
@@ -1011,6 +1162,10 @@ class Mirror:
         finally:
             events.cancel()
             toucher.cancel()
+            watcher.cancel()
+            if self.udp:
+                self.udp.close()
+                self.udp = None
             if self.repeater:
                 self.repeater.cancel()
                 self.repeater = None
@@ -1021,6 +1176,63 @@ class Mirror:
             self.connected(False)
             if self.audio:
                 self.audio.target = None
+
+    def udp_send(self, parts, pieces):
+        """An update as numbered pieces over UDP; the last one carries the end marker."""
+        for i, (rec, ((_, x, y, w, h), _, _)) in enumerate(zip(parts, pieces)):
+            last = i == len(parts) - 1
+            if last:
+                rec += RECT.pack(b"TAB5", 0, 0, 0, 0, 0)
+            area = np.s_[y // TILE:(y + h) // TILE, x // TILE:(x + w) // TILE]
+            seq, self.useq = self.useq, self.useq + 1
+            self.tile_seq[area] = seq
+            self.upieces[seq] = [area, last, None]
+            self.ustats[0] += 1
+            self.udp.put(seq, rec, last)
+        self.uflight.append(seq)   # (in step with in_flight: the update's last piece)
+
+    def udp_sent(self, seq, t):
+        if seq in self.upieces:
+            self.upieces[seq][2] = t
+
+    def udp_acked(self, seq):
+        """The Tab5 drew piece seq: those before it that it didn't acknowledge were lost (it never reorders)."""
+        if seq not in self.upieces:
+            return
+        while self.upieces:
+            s, rec = next(iter(self.upieces.items()))
+            del self.upieces[s]
+            self.udp_resolved(s, rec, s == seq)
+            if s == seq:
+                break
+
+    def udp_resolved(self, seq, rec, ok):
+        area, last, _ = rec
+        if not ok:   # its tiles go again in the next update, unless a later piece carried them since
+            self.ustats[1] += 1
+            self.lost_tiles[area] |= self.tile_seq[area] == seq
+            self.udp.backoff()
+            self.dirty.set()
+        if last and not ok and seq in self.uflight:   # its update won't be shown whole: don't wait for it
+            i = self.uflight.index(seq)
+            del self.uflight[i]
+            del self.in_flight[i]
+            self.acked.set()
+
+    async def udp_watch(self):
+        """Pieces not acknowledged within UDP_ACK_S of going out were lost; meanwhile the rate creeps up."""
+        while True:
+            await asyncio.sleep(0.05)
+            if not self.udp:
+                continue
+            now = time.monotonic()
+            while self.upieces:
+                s, rec = next(iter(self.upieces.items()))
+                if rec[2] is None or now - rec[2] < UDP_ACK_S:
+                    break
+                del self.upieces[s]
+                self.udp_resolved(s, rec, False)
+            self.udp.grow()
 
     async def open_lanes(self, host):
         """Spread the stream over several connections, if the Tab5 offered it (firmware 1.3). If it refuses, the
@@ -1127,6 +1339,13 @@ class Mirror:
     async def report(self, stats, secs):
         """Once a second: print a summary of continuous activity and hand it to the page (window.tab5Stats)."""
         self.adapt(stats, secs)
+        if self.udp:   # (the link estimate for the quality of large motion is found as for TCP)
+            sent, lost, resent = self.ustats
+            self.ustats = [0, 0, 0]
+            sent_b, self.udp.sent_bytes = self.udp.sent_bytes, 0
+            if sent:
+                print(f"udp: sent {sent_b / 1e6 / secs:.2f} MB/s (pace limit {self.udp.rate / 1e6:.2f}), pieces {sent} sent, "
+                      f"{lost} lost, {resent} tiles resent")
         n = len(stats)
         s = {"fps": n / secs, "kbps": sum(b for b, *_ in stats) / 1024 / secs,
              "area": 100 * sum(a for _, a, *_ in stats) / max(n, 1) / (W * H),
@@ -1646,6 +1865,9 @@ async def main():
                     help="TCP connections to spread the stream over, with firmware 1.3 or later (default 2; 1 = one "
                          "connection, as before)")
     ap.add_argument("--browser", default=find_browser(), help="Chromium, Chrome or Edge executable (default: found on the PATH or in the usual install folders)")
+    ap.add_argument("--udp", action="store_true", help="EXPERIMENT: the stream over UDP (udp-experiment firmware)")
+    ap.add_argument("--udp-piece", type=int, default=16, help="UDP: at most this many datagrams per piece (0: any)")
+    ap.add_argument("--udp-rate", type=float, default=3.0, help="UDP: starting rate, MB/s")
     ap.add_argument("--no-pacing", action="store_true",
                     help="videos: show frames as they arrive, without the Tab5's playout buffer (firmware 1.3.2)")
     ap.add_argument("--show", action="store_true", help="show the browser window too (for debugging)")
