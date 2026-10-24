@@ -3,6 +3,20 @@
 Versions follow [semantic versioning](https://semver.org). The firmware prints its version at boot, in the serial
 `S` statistics and in its settings panel; the server prints it at start and with `--version`.
 
+## 1.4.1 - 2026-10-23
+
+Server only; use it with firmware 1.4.0.
+
+- **Very detailed pictures no longer disconnect:** the Tab5 takes JPEGs of up to 1 MB. A full screen of fine
+  noise (film grain, static) at the top quality came to 1.06 MB, and the Tab5 dropped the connection; the server
+  reconnected and sent it again for ever (the keyboard's light flashed green and blue). Such a piece now goes out at
+  a lower quality, until it fits.
+- **Smoother video files:** frames go out 250 ms ahead of time instead of 100 ms, so the Tab5's playout buffer
+  rides out WiFi's hold-ups, when nothing arrives for 100-500 ms. Measured on a 4K clip: 1-11 % of the frames drawn
+  late instead of 13-19 %.
+- **No hitch when a video loops:** ffmpeg took ~250 ms to its first frame when started at the end; the next pass is
+  now started 2 s before.
+
 ## 1.4.0 - 2026-10-22
 
 Firmware and server. Older firmware and servers work with these: the mouse then acts as a finger.

@@ -43,7 +43,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from playwright.async_api import async_playwright
 
-__version__ = "1.4.0"
+__version__ = "1.4.1"
 
 W, H, TILE, PORT = 1280, 720, 16, 8765
 # Chromium's rasterisation jitters a few pixels by a few levels between frames. A tile counts as changed if some
@@ -75,6 +75,10 @@ ADAPT_Q_MIN, ADAPT_Q_MAX = 35, 85
 ADAPT_RATE0, ADAPT_RATE_MAX = 2.5e6, 6e6   # bytes/s: the first guess, and the most the estimate can grow to
 REFINE_TILES = (H // TILE) * (W // TILE) // 10
 SOFT_MIN = 48         # 4:2:0 only for pieces this big both ways: the Tab5's decoder times out on smaller 4:2:0 images
+# The Tab5 takes JPEGs of up to 1 MB and drops the connection on a larger one; a full screen of fine noise (film
+# grain, static) at q95 came to 1.06 MB, and the server reconnected and sent it again for ever. Such a piece goes
+# out at a lower quality instead, until it fits.
+JPEG_MAX, JPEG_MAX_Q_MIN = (1 << 20) - 4096, 20
 TOUCH_QUIET_S = 0.5   # ... but only one in flight this soon after a touch, where delay matters more than frame rate
 RECT = struct.Struct("<4sHHHHI")   # "TAB5" (or "TABS", a strip), x, y, w, h, jpeg length
 EVENT = struct.Struct("<BBHHH")    # type, flags, x, y, z
@@ -936,7 +940,11 @@ class Mirror:
                         pieces += [(piece, top, 0) for piece in plan(still, self.strips)]
                     out = bytearray()
                     for piece, q, sub in pieces:
-                        jpg = encode(piece_pixels(cur, piece, self.flipped), q, sub)
+                        px = piece_pixels(cur, piece, self.flipped)
+                        jpg = encode(px, q, sub)
+                        while len(jpg) > JPEG_MAX and q > JPEG_MAX_Q_MIN:   # (left counted as sent at q: no refining)
+                            q = max(q - 15, JPEG_MAX_Q_MIN)
+                            jpg = encode(px, q, sub)
                         out += RECT.pack(b"TABS" if piece[0] == "strip" else b"TAB5", *piece[1:], len(jpg)) + jpg
                     work[1] = time.monotonic()
                     return pieces, out
@@ -1164,8 +1172,12 @@ PREVIEW_S = 0.15        # while seeking, the frame at the drag position is shown
 # Playout buffer (firmware 1.3.2, on lanes): video frames go out VIDEO_LEAD_S before they are due, each with its due
 # time ("TPTS"), and the Tab5 shows them then, evenly, instead of as WiFi delivers them (in bunches: a 30 fps video
 # skipped a frame on the screen every fifth or so). They show VIDEO_AV_S after the clock, as the sound does.
-VIDEO_LEAD_S, VIDEO_AV_S = 0.10, 0.06
-PACED_IN_FLIGHT = 8     # updates in flight while timed: the lead holds several frames
+# The lead also rides out WiFi's hold-ups, when nothing at all arrives for 100-500 ms: with 0.10 s, 13-19 % of the
+# frames of a 4K clip were drawn late; with 0.25 s, 1-11 % (alternating runs, same WiFi). The frames waiting in the
+# Tab5's lane buffers (2 x 1 MB) take ~0.25 s x the link rate.
+VIDEO_LEAD_S, VIDEO_AV_S = 0.25, 0.06
+PACED_IN_FLIGHT = 12    # updates in flight while timed: the lead holds several frames
+LOOP_PREPARE_S = 2.0    # the next pass's decoders start this long before the end
 PACED_LATE_MS = 5       # a timed frame drawn this much after its time was late (the Tab5 says, in its "shown")
 KEY_SEEK_S = (5, 1)     # the arrow keys seek this far (s), then this far each repeat while held; x6 with Aa (Shift)
 ACCENT = (90, 226, 199)  # as in the Tab5's settings
@@ -1231,6 +1243,7 @@ class Video:
         self.loop = asyncio.get_running_loop()
         self.gen = 0                  # bumped by every (re)start; older decoder threads then quit
         self.procs = []
+        self.next_procs = []          # the next pass's decoders, started shortly before the end (see prepare_loop)
         self.halts = {"offline"}      # the clock stands still while any: "pause", "seek", "offline" (no Tab5)
         self.clock = (0.0, time.monotonic(), False)   # (position, at monotonic time, running): one atomic value
         self.skipped = 0              # frames dropped because decoding fell behind
@@ -1253,26 +1266,39 @@ class Video:
         return (f"fps={self.fps:.3f},scale={W}:{H}:force_original_aspect_ratio=decrease,"
                 f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2")
 
+    def spawn(self, pos):
+        """ffmpeg for the picture (and the sound) from pos seconds; it starts decoding at once."""
+        cmd = ["ffmpeg", "-v", "error", "-nostdin", "-ss", f"{pos:.3f}", "-i", str(self.path), "-sn"]
+        procs = [subprocess.Popen(cmd + ["-an", "-vf", self.filters(), "-pix_fmt", "rgb24", "-f", "rawvideo", "-"],
+                                  stdout=subprocess.PIPE)]
+        if self.audio:
+            procs.append(subprocess.Popen(cmd + ["-vn", "-f", "s16le", "-ar", str(AUDIO_RATE), "-ac", "2", "-"],
+                                          stdout=subprocess.PIPE))
+        return procs
+
+    def prepare_loop(self, gen):
+        """Near the end: start the next pass's decoders now. Started at the end, ffmpeg took ~250 ms to its first
+        frame (4K), a visible hitch at every loop; ready by then, the next pass follows on from the last frame."""
+        if gen == self.gen and not self.next_procs:
+            self.next_procs = self.spawn(0.0)
+
     def start(self, pos):
         """(Re)start decoding at pos seconds; the clock keeps running or standing still as before."""
+        ready = self.next_procs if pos == 0.0 else None
+        if ready:
+            self.next_procs = []
         self.stop()
         self.gen += 1
         self.clock = (pos, time.monotonic(), not self.halts)
-        cmd = ["ffmpeg", "-v", "error", "-nostdin", "-ss", f"{pos:.3f}", "-i", str(self.path), "-sn"]
-        v = subprocess.Popen(cmd + ["-an", "-vf", self.filters(), "-pix_fmt", "rgb24", "-f", "rawvideo", "-"],
-                             stdout=subprocess.PIPE)
-        self.procs = [v]
-        threading.Thread(target=self.play_video, args=(self.gen, v, pos), daemon=True).start()
+        self.procs = ready or self.spawn(pos)
+        threading.Thread(target=self.play_video, args=(self.gen, self.procs[0], pos), daemon=True).start()
         if self.audio:
-            a = subprocess.Popen(cmd + ["-vn", "-f", "s16le", "-ar", str(AUDIO_RATE), "-ac", "2", "-"],
-                                 stdout=subprocess.PIPE)
-            self.procs.append(a)
-            threading.Thread(target=self.play_sound, args=(self.gen, a, pos), daemon=True).start()
+            threading.Thread(target=self.play_sound, args=(self.gen, self.procs[1], pos), daemon=True).start()
 
     def stop(self):
-        for p in self.procs:
+        for p in self.procs + self.next_procs:
             p.kill()
-        self.procs = []
+        self.procs, self.next_procs = [], []
 
     def wait_for(self, gen, pts, lead=0.0):
         """Sleep until the clock reaches pts - lead (only while it runs: never past a pause); False if this decoder was
@@ -1294,6 +1320,8 @@ class Video:
                     self.loop.call_soon_threadsafe(self.ended, gen, start, i == 0)
                     return
                 pts = start + i / self.fps
+                if self.duration and pts > self.duration - LOOP_PREPARE_S and not self.next_procs:
+                    self.loop.call_soon_threadsafe(self.prepare_loop, gen)
                 # the first frame shows at once, so a seek while paused shows where it landed
                 if i and not self.wait_for(gen, pts, self.lead):
                     return
