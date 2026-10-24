@@ -580,6 +580,11 @@ class Mirror:
         self.writer = None
         self.dirty = asyncio.Event()
         self.touch_at = None          # when the last touch event arrived, for the touch -> shown latency
+        # -v: each tap's way to the screen, for finding what held one up. rx_at: when the oldest action (a touch
+        # going down or up, a key, a click, the wheel, a gesture) not yet handed to the page arrived from the Tab5;
+        # traces: (page done) -> stage times of that action; frame_rx: when the frame now shown left Chromium.
+        self.rx_at, self.rx_buttons, self.traces = None, 0, {}
+        self.latest_rx = self.frame_rx = 0.0
         self.latest = None            # newest screencast frame (base64 PNG) not yet decoded
         self.decoding = None          # the task decoding screencast frames
         self.decode_times = []        # how long each decode took, for the stats
@@ -625,16 +630,17 @@ class Mirror:
         """A screencast frame (base64 PNG). It is decoded in the background, while the previous one is encoded and
         sent: a detailed frame takes 20-40 ms to decode, and decoded only when needed it held a video in a page to
         ~22 fps although Chromium painted 30. Frames that arrive during a decode collapse into the newest."""
-        self.latest = data
+        self.latest, self.latest_rx = data, time.monotonic()
         self.frames_in += 1
         if self.decoding is None or self.decoding.done():
             self.decoding = asyncio.create_task(self.decode_latest())
 
     async def decode_latest(self):
         while self.latest is not None:
-            data, self.latest = self.latest, None
+            data, self.latest, rx = self.latest, None, self.latest_rx
             t0 = time.monotonic()
             self.frame = await asyncio.to_thread(self.decode_png, data)
+            self.frame_rx = rx
             self.decode_times.append(time.monotonic() - t0)
             self.dirty.set()
 
@@ -903,6 +909,7 @@ class Mirror:
             self.input_wake.clear()
             while self.inputs:
                 kind, *rest = self.inputs.popleft()
+                start, before = time.monotonic(), self.touch_at
                 if kind == EV_KEY:
                     await self.key(*rest)
                 elif kind == EV_GESTURE:
@@ -911,10 +918,35 @@ class Mirror:
                     await self.mouse_event(*rest)
                 else:
                     await self.touch(kind, *rest)
+                if self.args.verbose and self.rx_at is not None and self.touch_at not in (None, before):
+                    self.traces = {self.touch_at: {"rx": self.rx_at, "page": start}}   # (only the newest is followed)
+                    self.rx_at = None
+
+    def action_arrived(self, kind, flags, z):
+        """-v: an event that should change something on the screen (not a move) arrived from the Tab5."""
+        action = kind in (EV_DOWN, EV_UP, EV_GESTURE) or kind == EV_KEY and flags & 1
+        if kind == EV_MOUSE:
+            action, self.rx_buttons = bool(z) or flags & 0x1F != self.rx_buttons, flags & 0x1F
+        if action and self.rx_at is None:
+            self.rx_at = time.monotonic()
+
+    def trace_line(self, touch_t, now):
+        """-v: one line per action shown: the times from its arrival, at each stage on its way to the screen."""
+        t = self.traces.pop(touch_t, None)
+        if not t or "sent" not in t:
+            return None
+        ms = lambda k: f"{1000 * (t[k] - t['rx']):+.0f}"
+        frame = "" if not t["frame"] else f"frame painted {ms('frame')}" + (
+            " (before the page took it: its reaction comes in a later update)" if t["frame"] < touch_t else "") + " | "
+        return (f"action: arrived +0 | queued until {ms('page')} | page took it {1000 * (touch_t - t['rx']):+.0f} | {frame}"
+                f"captured {ms('t0')} | encoded {ms('t2')} | sent {ms('sent')} (waited {1000 * (t['send'] - t['t2']):.0f} "
+                f"for the Tab5) | shown {1000 * (now - t['rx']):+.0f} ms")
 
     async def read_events(self, reader):
         while True:
             kind, flags, x, y, _z = EVENT.unpack(await reader.readexactly(EVENT.size))
+            if self.args.verbose:
+                self.action_arrived(kind, flags, _z)
             if kind == EV_SHOWN:
                 if not self.live:
                     self.live = True
@@ -932,7 +964,7 @@ class Mirror:
                     self.show_times.append(now - sent_at)
                     self.shown_at.append(now)
                     if touch_t is not None:
-                        print(f"touch->shown {1000 * (now - touch_t):4.0f} ms")
+                        print(self.trace_line(touch_t, now) or f"touch->shown {1000 * (now - touch_t):4.0f} ms")
                 if self.udp:   # drawn: the update ending with piece y | z << 16 (and any before it, not shown whole)
                     seq = y | _z << 16
                     while self.uflight and self.uflight[0] <= seq:
@@ -948,7 +980,7 @@ class Mirror:
                         self.show_times.append(now - sent_at)
                         self.shown_at.append(now)
                         if touch_t is not None:
-                            print(f"touch->shown {1000 * (now - touch_t):4.0f} ms")
+                            print(self.trace_line(touch_t, now) or f"touch->shown {1000 * (now - touch_t):4.0f} ms")
                 self.acked.set()
             elif kind == EV_PIECE:
                 self.udp_acked(x | y << 16)
@@ -1030,6 +1062,7 @@ class Mirror:
                 t0 = last_start = time.monotonic()
                 touch_t = self.touch_at if self.touch_at is not None and self.touch_at < t0 else None
                 moving = not settle and t0 - last_sent < MOTION_S
+                frame_rx = self.frame_rx
                 cur = await self.capture()
                 due = self.cap_due if self.timed else None
                 t1 = time.monotonic()
@@ -1135,6 +1168,8 @@ class Mirror:
                         await self.send(out)
                     t_sent = time.monotonic()
                     last_sent = t0
+                    if touch_t in self.traces:
+                        self.traces[touch_t].update(frame=frame_rx, t0=t0, t2=t2, send=t_send, sent=t_sent)
                     # remember only what the Tab5 now shows, so sub-threshold drift still adds up and gets sent
                     if prev is None:
                         prev = cur.copy()
