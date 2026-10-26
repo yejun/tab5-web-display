@@ -1,15 +1,22 @@
-// Tunnel: the Tab5 connects out to the PC, through a tunnel or reverse proxy that the user sets up (a Cloudflare
-// Tunnel, ngrok, Tailscale Funnel, nginx, ...), so it works on any network that reaches that, not only on the PC's.
-// On the PC, `server.py --listen PORT` runs a bridge (server/tunnel.py) that takes the Tab5's connection on that port
-// and stands in for the Tab5 on 127.0.0.1, so the server drives it as usual. The Tab5 is given the tunnel's address
-// plus the key the server prints: https://tab5.example.com/<key> (serial: tunnel <address>, saved; tunnel off).
+// Remote server: the Tab5 connects out to the PC, through a tunnel or reverse proxy that the user sets up (a
+// Cloudflare Tunnel, ngrok, Tailscale Funnel, nginx, ...), so it works on any network that reaches that, not only on
+// the PC's. On the PC, `server.py --listen PORT` runs a bridge (server/tunnel.py) that takes the Tab5's connection on
+// that port and stands in for the Tab5 on 127.0.0.1, so the server drives it as usual.
 //
-// Tunnels carry HTTP, so the connections are WebSockets: over TLS for https:// and wss:// addresses (port 443 unless
-// given, the server's certificate checked against the core's CA bundle), plain for http:// and ws:// (port 80; for a
-// VPN or the local network). The Tab5 keeps one open to <address>/tab5 while it waits; when server.py connects, the
-// bridge says "attach" (a text message), and from then on binary messages carry the main connection's bytes both
-// ways. After offering lanes, the Tab5 opens <address>/lane once per lane, and the bridge joins each to one of the
-// server's lane connections, which then open with "TLAN" as on the network.
+// Remote mode is a setting (the panel, or serial: tunnel <https address> | tunnel on | tunnel off; saved). While it
+// is on, the Tab5 takes no connections from the local network: on a public network anyone could take the screen
+// and read what is typed. The address must be https: the connection is a WebSocket over TLS (port 443 unless given,
+// the server's certificate checked against the core's CA bundle).
+//
+// Pairing: the Tab5 has a random 128-bit ID (made once, saved) that it sends with every connection, and a six-digit
+// code made from it, shown on its screen. The bridge asks on the PC before taking a Tab5 it doesn't know ("Pair the
+// Tab5 with code 482 913?"), and keeps the ones allowed. It answers with a text message: "pair" (asking on the PC),
+// "ok" (known) or "denied" (then it closes; the Tab5 asks again after a minute).
+//
+// The Tab5 keeps a WebSocket open to <address>/tab5 while it waits; when server.py connects, the bridge says
+// "attach", and from then on binary messages carry the main connection's bytes both ways. After offering lanes, the
+// Tab5 opens <address>/lane once per lane, and the bridge joins each to one of the server's lane connections, which
+// then open with "TLAN" as on the network.
 //
 // Sound: the server sends its UDP datagrams to the bridge, which passes each on as a message of its own on the main
 // WebSocket. There every message from the bridge opens with a channel byte: 0 = the stream's bytes, 1 = a sound
@@ -23,10 +30,14 @@
 #include <mbedtls/platform.h>
 #include <mbedtls/ssl.h>
 #include <mbedtls/net_sockets.h>
+#include <mbedtls/sha256.h>
 
 static void drop_client();
+static void local_listen(bool on);
 
 static constexpr int TUN_OPEN_MS = 10000;
+static constexpr int64_t TUN_DENIED_MS = 60000;   // not allowed on the PC: ask again after this
+enum : uint8_t { PAIR_NONE, PAIR_ASKING, PAIR_OK, PAIR_DENIED };   // the bridge's answer
 // Lanes over the tunnel: off. With them, three connections each held a 16 KB TLS record buffer in internal RAM, and
 // their TCP windows (in lwIP's internal RAM) filled whenever a task fell behind: internal RAM ran out (the AES
 // engine then failed, and the connection with it). Through a tunnel the Tab5's TCP connection usually ends at the
@@ -46,7 +57,7 @@ struct Ws {
   esp_tls_t* tls = nullptr;
   int fd = -1;
   bool dead = false, attached = false;
-  bool secure = true;                   // TLS (https://, wss://), or plain TCP (http://, ws://)
+  uint8_t pair = PAIR_NONE;             // what the bridge said about this Tab5
   uint8_t hdr[14];
   uint8_t hn = 0;                       // frame header bytes read so far
   uint8_t op = 0;                       // the frame being read: its opcode and payload bytes still to come
@@ -87,7 +98,7 @@ static void* tun_calloc(size_t n, size_t size) {
   return p ? p : heap_caps_calloc(n, size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
 }
 
-// "https://name[:port]/key" -> host "name[:port]", path prefix "/key"
+// "https://name[:port]/path" -> host "name[:port]", path prefix "/path"
 static void tun_split(const char* addr, char* host, size_t hn, char* prefix, size_t pn) {
   const char* p = strstr(addr, "://");
   p = p ? p + 3 : addr;
@@ -141,16 +152,8 @@ static int raw_bio_send(void* ctx, const unsigned char* p, size_t n) {
   return errno == EAGAIN || errno == EWOULDBLOCK ? MBEDTLS_ERR_SSL_WANT_WRITE : MBEDTLS_ERR_NET_SEND_FAILED;
 }
 
-static int tls_rd(Ws& w, void* p, size_t n) {
-  if (w.secure) return esp_tls_conn_read(w.tls, p, n);
-  const int r = raw_take(w.in, (uint8_t*)p, n);
-  return r >= 0 ? r : ESP_TLS_ERR_SSL_WANT_READ;
-}
-static int tls_wr(Ws& w, const void* p, size_t n) {
-  if (w.secure) return esp_tls_conn_write(w.tls, p, n);
-  const int r = raw_bio_send(w.in, (const unsigned char*)p, n);
-  return r == MBEDTLS_ERR_SSL_WANT_WRITE ? ESP_TLS_ERR_SSL_WANT_WRITE : r;
-}
+static int tls_rd(Ws& w, void* p, size_t n) { return esp_tls_conn_read(w.tls, p, n); }
+static int tls_wr(Ws& w, const void* p, size_t n) { return esp_tls_conn_write(w.tls, p, n); }
 
 static bool ws_wait(const Ws& w, int ms) {   // until something arrives (or the socket fails)
   fd_set r;
@@ -270,25 +273,52 @@ static int ws_read(Ws& w, uint8_t* p, size_t n) {
   frame_done:
     if (w.op == 9) ws_send(w, 10, w.ctl, w.cn);                                      // ping: pong
     else if (w.op == 8) { w.err = 1; w.dead = true; return -1; }                     // close
-    else if (w.op == 1 && w.cn == 6 && !memcmp(w.ctl, "attach", 6)) w.attached = true;
+    else if (w.op == 1) {                                                             // the bridge's word
+      w.ctl[w.cn] = 0;
+      if (!strcmp((char*)w.ctl, "attach")) w.attached = true;
+      else if (!strcmp((char*)w.ctl, "pair")) w.pair = PAIR_ASKING;
+      else if (!strcmp((char*)w.ctl, "ok")) w.pair = PAIR_OK;
+      else if (!strcmp((char*)w.ctl, "denied")) w.pair = PAIR_DENIED;
+    }
     w.op = 2;   // (the next frame's header sets it)
   }
 }
+
+// ---- the Tab5's ID ----
+
+static char g_dev_id[33] = "";      // 128 random bits in hex: sent with every connection, so kept secret
+static char g_dev_code[8] = "";     // "482 913", made from it, shown on both sides when pairing
+static char g_dev_hash[65] = "";    // SHA-256 of the ID (what the bridge keeps), for pairing over USB
+
+static void tun_identity() {   // (made once, the first time remote mode is on)
+  if (!g_dev_id[0]) snprintf(g_dev_id, sizeof(g_dev_id), "%s", prefs.getString("devid", "").c_str());
+  if (strlen(g_dev_id) != 32) {
+    uint8_t r[16];
+    esp_fill_random(r, sizeof(r));
+    for (int i = 0; i < 16; i++) snprintf(g_dev_id + 2 * i, 3, "%02x", r[i]);
+    prefs.putString("devid", g_dev_id);
+  }
+  uint8_t h[32];
+  mbedtls_sha256((const uint8_t*)g_dev_id, 32, h, 0);
+  for (int i = 0; i < 32; i++) snprintf(g_dev_hash + 2 * i, 3, "%02x", h[i]);
+  const uint32_t c = ((uint32_t)h[0] << 24 | h[1] << 16 | h[2] << 8 | h[3]) % 1000000;
+  snprintf(g_dev_code, sizeof(g_dev_code), "%03u %03u", (unsigned)(c / 1000), (unsigned)(c % 1000));
+}
+
+// ---- WebSocket ----
 
 static bool ws_open(Ws& w, const char* addr, const char* path, char* why, size_t whyn) {
   w = Ws{};
   w.dead = true;
   char hostport[96], prefix[64];
   tun_split(addr, hostport, sizeof(hostport), prefix, sizeof(prefix));
-  w.secure = strncmp(addr, "http://", 7) && strncmp(addr, "ws://", 5);
   char host[96];
   snprintf(host, sizeof(host), "%s", hostport);
   char* colon = strrchr(host, ':');
-  const int port = colon ? atoi(colon + 1) : w.secure ? 443 : 80;
+  const int port = colon ? atoi(colon + 1) : 443;
   if (colon) *colon = 0;
   const int64_t t0 = now_ms();
   esp_tls_cfg_t cfg = {};
-  cfg.is_plain_tcp = !w.secure;
   cfg.crt_bundle_attach = esp_crt_bundle_attach;
   cfg.timeout_ms = TUN_OPEN_MS;
   // (not cfg.non_block: esp-tls then retries the handshake's reads in a busy loop, which starved the other tasks
@@ -312,17 +342,17 @@ static bool ws_open(Ws& w, const char* addr, const char* path, char* why, size_t
   if (w.in) w.in->buf = (uint8_t*)heap_caps_malloc(TUN_RAW, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (!w.in || !w.in->buf) { snprintf(why, whyn, "no memory"); ws_close(w); return false; }
   w.in->fd = w.fd;
-  if (w.secure) mbedtls_ssl_set_bio((mbedtls_ssl_context*)esp_tls_get_ssl_context(w.tls), w.in, raw_bio_send, raw_bio_recv, nullptr);
+  mbedtls_ssl_set_bio((mbedtls_ssl_context*)esp_tls_get_ssl_context(w.tls), w.in, raw_bio_send, raw_bio_recv, nullptr);
   const int one = 1;
   setsockopt(w.fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
   uint8_t key[16], key64[32];
   size_t kl = 0;
   esp_fill_random(key, sizeof(key));
   mbedtls_base64_encode(key64, sizeof(key64), &kl, key, sizeof(key));
-  char req[384];
+  char req[448];
   const int n = snprintf(req, sizeof(req), "GET %s%s HTTP/1.1\r\nHost: %s\r\nUser-Agent: Tab5\r\nUpgrade: websocket\r\n"
-                         "Connection: Upgrade\r\nSec-WebSocket-Key: %.*s\r\nSec-WebSocket-Version: 13\r\n\r\n",
-                         prefix, path, hostport, (int)kl, key64);
+                         "Connection: Upgrade\r\nSec-WebSocket-Key: %.*s\r\nSec-WebSocket-Version: 13\r\n"
+                         "X-Tab5-Device: %s\r\n\r\n", prefix, path, hostport, (int)kl, key64, g_dev_id);
   if (!tls_write_all(w, (const uint8_t*)req, n)) { snprintf(why, whyn, "upgrade not sent"); ws_close(w); return false; }
   // the answer's head, a byte at a time (whatever follows it is the first frame)
   char head[512];
@@ -348,7 +378,6 @@ static bool ws_open(Ws& w, const char* addr, const char* path, char* why, size_t
 
 static const char* ws_cipher(const Ws& w) {
   if (!w.tls) return "-";
-  if (!w.secure) return "no TLS";
   return mbedtls_ssl_get_ciphersuite((mbedtls_ssl_context*)esp_tls_get_ssl_context(w.tls));
 }
 
@@ -360,6 +389,9 @@ static const char* ws_cipher(const Ws& w) {
 static SemaphoreHandle_t g_tw_lock;
 static constexpr uint32_t TUN_RING = 1 << 20;   // (a power of two)
 static std::atomic<uint32_t> g_twr{0}, g_trd{0};   // bytes stored by the task / taken by the main loop
+
+static int64_t g_tun_retry_at = 0;   // not before then (denied on the PC)
+static uint8_t g_tun_pair = PAIR_NONE;   // the bridge's last answer, kept while reconnecting
 
 static void tun_connect_task(void*) {
   bool failing = false;
@@ -379,8 +411,14 @@ static void tun_connect_task(void*) {
           g_tstats.read_us += us;
           g_tstats.read_max_us = max(g_tstats.read_max_us, us);
         }
+        if (g_tw.pair != PAIR_NONE && g_tw.pair != g_tun_pair) {
+          g_tun_pair = g_tw.pair;
+          Serial.printf("tunnel: %s\n", g_tun_pair == PAIR_OK ? "paired with the PC" : g_tun_pair == PAIR_ASKING ?
+                        "the PC is asking whether to pair" : "not allowed on the PC; asking again in a minute");
+          if (g_tun_pair == PAIR_DENIED) g_tun_retry_at = now_ms() + TUN_DENIED_MS;
+        }
         if (r < 0 && !g_tun_client) {   // closed while waiting for the PC: open another (with a PC, the main loop does)
-          Serial.printf("tunnel: the waiting connection closed (%d)\n", g_tw.err);
+          if (g_tun_pair != PAIR_DENIED) Serial.printf("tunnel: the waiting connection closed (%d)\n", g_tw.err);
           ws_close(g_tw);
           g_tw_state = 0;
         }
@@ -393,7 +431,8 @@ static void tun_connect_task(void*) {
     }
     char addr[sizeof(g_tun)];
     memcpy(addr, g_tun, sizeof(addr));
-    if (addr[0] && g_wifi == WIFI_UP && !g_have_client) {   // (none while a PC on the network has the Tab5, see pc_attach())
+    // (not while the settings are open: the PC is refused then, and would be over and over)
+    if (g_remote && addr[0] && g_wifi == WIFI_UP && !g_panel_open && now_ms() >= g_tun_retry_at) {
       Ws w;
       char why[48];
       if (ws_open(w, addr, "/tab5", why, sizeof(why))) {
@@ -405,6 +444,7 @@ static void tun_connect_task(void*) {
         g_tw_state = 1;
         xSemaphoreGive(g_tw_lock);
         g_tstats.opens++;
+        g_tstats.why[0] = 0;
         if (failing) Serial.println("tunnel: reached");
         failing = false;
         Serial.printf("tunnel: open in %u ms (%s), waiting for the PC\n", (unsigned)w.open_ms, ws_cipher(w));
@@ -558,13 +598,57 @@ static void tun_bench() {
 
 // ---- setup and settings ----
 
-static void tun_set(const String& addr) {   // serial "tunnel <address>" / "tunnel off"
-  snprintf(g_tun, sizeof(g_tun), "%s", addr == "off" ? "" : addr.c_str());
-  prefs.putString("tun", g_tun);
-  if (g_tun_client) drop_client();
-  else tun_close();
-  Serial.printf("tunnel: %s\n", g_tun[0] ? "set" : "off");
+// The second line of the status screen in remote mode
+static void tun_status_line(char* b, size_t n) {
+  if (g_tun_pair == PAIR_ASKING) snprintf(b, n, "Allow this Tab5 on the PC: pairing code %s", g_dev_code);
+  else if (g_tun_pair == PAIR_DENIED) snprintf(b, n, "Not allowed on the PC (code %s); asking again in a minute", g_dev_code);
+  else if (g_tw_state.load() == 1) snprintf(b, n, "Connected, waiting for server.py (pairing code %s)", g_dev_code);
+  else if (g_tstats.why[0]) snprintf(b, n, "Can't reach it: %.60s", g_tstats.why);
+  else snprintf(b, n, "Connecting ...  (pairing code %s)", g_dev_code);
+}
+
+static bool tun_ui_changed() {   // has anything in that line changed?
+  static int last = -1;
+  const int now = g_remote ? 1 + g_tw_state.load() * 2 + g_tun_pair * 4 + (g_tstats.why[0] ? 32 : 0) : 0;
+  const bool changed = now != last;
+  last = now;
+  return changed && g_remote;
+}
+
+// Remote mode on or off (serial "tunnel ...", the panel), with a new address if one is given (https only).
+static bool tun_set_remote(bool on, const char* addr = nullptr) {
+  if (addr) {
+    if (strncmp(addr, "https://", 8) || !addr[8]) return false;
+    snprintf(g_tun, sizeof(g_tun), "%s", addr);
+    prefs.putString("tun", g_tun);
+  }
+  if (on && !g_tun[0]) return false;
+  g_remote = on;
+  prefs.putBool("remote", on);
+  if (on) tun_identity();
+  drop_client();
+  tun_close();
+  g_tun_pair = PAIR_NONE;
+  g_tun_retry_at = 0;
+  g_tstats.why[0] = 0;
+  if (g_wifi == WIFI_UP) local_listen(!on);
   status_screen();
+  return true;
+}
+
+static void tun_command(const String& arg) {   // serial "tunnel [<address> | on | off | id]"
+  if (arg == "on" || arg == "off") {
+    if (!tun_set_remote(arg == "on")) Serial.println("tunnel: no address yet (tunnel <https address>)");
+  } else if (arg == "id") {   // for pairing over USB: the ID's hash, which is what the bridge keeps
+    tun_identity();
+    Serial.printf("tunnel: device %s code %s\n", g_dev_hash, g_dev_code);
+    return;
+  } else if (arg.length() && !tun_set_remote(true, arg.c_str())) {
+    Serial.println("tunnel: the address must start with https://");
+    return;
+  }
+  Serial.printf("tunnel: remote mode %s, address %s, pairing code %s\n", g_remote ? "on" : "off",
+                g_tun[0] ? g_tun : "none", g_dev_code[0] ? g_dev_code : "(made when remote mode is first on)");
 }
 
 static void tun_setup() {
@@ -574,6 +658,8 @@ static void tun_setup() {
   g_tbuf = (uint8_t*)heap_caps_malloc(TUN_RING, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   g_tw_lock = xSemaphoreCreateMutex();
   snprintf(g_tun, sizeof(g_tun), "%s", prefs.getString("tun", "").c_str());
+  g_remote = g_tun[0] && prefs.getBool("remote", false);
+  if (g_remote || prefs.isKey("devid")) tun_identity();
   // (its stack in internal RAM: mbedTLS passes the AES engine a record's header from the stack, and with that in
   // PSRAM the engine only did part of the work, decrypting at 3 MB/s instead of 40)
   if (xTaskCreate(tun_connect_task, "tunnel", 12288, nullptr, 5, nullptr) != pdPASS) Serial.println("tunnel: no task");
@@ -590,8 +676,11 @@ static void tun_stats() {
                 g_tstats.read_us ? (double)g_tstats.read_bytes / g_tstats.read_us : 0.0, (unsigned)g_tstats.read_max_us);
   g_tstats.read_bytes = g_tstats.read_us = g_tstats.read_max_us = 0;
   g_tstats.queued_max[0] = g_tstats.queued_max[1] = g_tstats.queued_max[2] = 0;
-  Serial.printf("tunnel | %s | %s | opened %u, failed %u | lanes opened %u, slowest %u ms | open took %u ms, %s\n",
-                g_tun[0] ? host : "off", g_tun_client ? "PC attached" : g_tw_state.load() ? "waiting" : "not open",
+  Serial.printf("tunnel | %s %s | %s, pairing %s, code %s | opened %u, failed %u | lanes opened %u, slowest %u ms | open took %u ms, %s\n",
+                g_remote ? "remote" : "local, remote server", g_tun[0] ? host : "none",
+                g_tun_client ? "PC attached" : g_tw_state.load() ? "waiting" : "not open",
+                g_tun_pair == PAIR_OK ? "paired" : g_tun_pair == PAIR_ASKING ? "asking" : g_tun_pair == PAIR_DENIED ? "denied" : "-",
+                g_dev_code[0] ? g_dev_code : "-",
                 (unsigned)g_tstats.opens, (unsigned)g_tstats.fails, (unsigned)g_tstats.lane_opens,
                 (unsigned)g_tstats.lane_open_ms, (unsigned)g_tw.open_ms, ws_cipher(g_tw));
   g_tstats.lane_opens = g_tstats.lane_open_ms = 0;

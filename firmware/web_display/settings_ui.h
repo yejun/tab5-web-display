@@ -1,4 +1,5 @@
-// Settings panel (LVGL): WiFi network list and password entry, connection status, battery, brightness, volume, flip.
+// Settings panel (LVGL): WiFi network list and password entry, connection status and the remote server (tunnel.h),
+// battery, brightness, volume, flip.
 // Included by web_display.ino after the WiFi and display helpers. LVGL only runs while the panel is open; its
 // strips are rotated into the frame buffer by the PPA like the page rectangles. While the panel is open the PC
 // connection is refused; the PC reconnects within 2 s of closing and sends a full frame.
@@ -17,7 +18,9 @@ static lv_display_t* g_disp;
 static lv_obj_t *ui_wifi, *ui_addr, *ui_pc, *ui_pc_dot, *ui_hint, *ui_list, *ui_scan_btn, *ui_scan_lbl;
 static lv_obj_t *ui_modal, *ui_modal_title, *ui_ta_ssid, *ui_ta_pass, *ui_show_btn, *ui_msg, *ui_spinner, *ui_kb;
 static lv_obj_t *ui_connect_btn, *ui_bri, *ui_vol, *ui_kled, *ui_flip, *ui_srev, *ui_batt;
+static lv_obj_t *ui_addr_head, *ui_remote;
 static bool g_scanning = false, g_connect_pending = false, g_touch_block = false;
+static bool g_modal_url = false;   // the dialog is asking for the remote server's address
 static String g_pending_ssid;   // the network the dialog is joining
 
 static void ui_start_scan();
@@ -159,7 +162,14 @@ static void ui_refresh_status() {
     case WIFI_UP:         lv_label_set_text_fmt(ui_wifi, LV_SYMBOL_WIFI "  %s  (%d dBm)", g_ssid.c_str(), (int)WiFi.RSSI()); break;
   }
   lv_obj_set_style_text_color(ui_wifi, lv_color_hex(g_wifi == WIFI_FAILED ? C_WARN : C_INK), 0);
-  if (g_wifi == WIFI_UP) {
+  lv_label_set_text(ui_addr_head, g_remote ? "REMOTE SERVER" : "ADDRESS");
+  lv_obj_set_style_text_font(ui_addr, g_remote ? &lv_font_montserrat_20 : &lv_font_montserrat_28, 0);   // (hosts are long)
+  if (g_remote) {   // the server's host; tap it to change the address
+    char host[96], prefix[64];
+    tun_split(g_tun, host, sizeof(host), prefix, sizeof(prefix));
+    lv_label_set_text(ui_addr, host);
+    lv_label_set_text_fmt(ui_hint, "Pairing code %s\nOn the PC: server.py --listen", g_dev_code);
+  } else if (g_wifi == WIFI_UP) {
     lv_label_set_text_fmt(ui_addr, "%s : %u", ip.c_str(), PORT);
     lv_label_set_text_fmt(ui_hint, "On the PC run:\nserver.py --device %s", ip.c_str());
   } else {
@@ -262,10 +272,22 @@ static void ui_scan_poll() {
 
 static void ui_hide_modal() {
   g_connect_pending = false;
+  if (g_modal_url && !g_remote) lv_obj_remove_state(ui_remote, LV_STATE_CHECKED);   // (cancelled: no address)
+  g_modal_url = false;
   lv_obj_add_flag(ui_modal, LV_OBJ_FLAG_HIDDEN);
 }
 
 static void ui_connect() {
+  if (g_modal_url) {
+    if (!tun_set_remote(true, lv_textarea_get_text(ui_ta_ssid))) {
+      lv_label_set_text(ui_msg, "The address must start with https://");
+      lv_obj_set_style_text_color(ui_msg, lv_color_hex(C_WARN), 0);
+      return;
+    }
+    ui_hide_modal();
+    ui_refresh_status();
+    return;
+  }
   const char* ssid = lv_textarea_get_text(ui_ta_ssid);
   if (!ssid[0]) { lv_label_set_text(ui_msg, "Enter the network name"); return; }
   g_pending_ssid = ssid;
@@ -277,8 +299,31 @@ static void ui_connect() {
   lv_obj_add_state(ui_connect_btn, LV_STATE_DISABLED);
 }
 
+// The same dialog asking for the remote server's address: one field, no password
+static void ui_show_url_modal() {
+  g_modal_url = true;
+  lv_textarea_set_text(ui_ta_ssid, g_tun[0] ? g_tun : "https://");
+  lv_textarea_set_placeholder_text(ui_ta_ssid, "https://tab5.example.com");
+  lv_obj_remove_flag(ui_ta_ssid, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(lv_obj_get_parent(ui_ta_pass), LV_OBJ_FLAG_HIDDEN);
+  lv_label_set_text(ui_modal_title, "Remote server");
+  lv_label_set_text(ui_msg, "Your tunnel to the PC (server.py --listen)");
+  lv_obj_set_style_text_color(ui_msg, lv_color_hex(C_DIM), 0);
+  lv_obj_add_flag(ui_spinner, LV_OBJ_FLAG_HIDDEN);
+  lv_label_set_text(lv_obj_get_child(ui_connect_btn, 0), "Save");
+  lv_obj_remove_state(ui_connect_btn, LV_STATE_DISABLED);
+  lv_obj_remove_flag(ui_modal, LV_OBJ_FLAG_HIDDEN);
+  lv_keyboard_set_textarea(ui_kb, ui_ta_ssid);
+  lv_obj_add_state(ui_ta_ssid, LV_STATE_FOCUSED);
+  lv_obj_remove_state(ui_ta_pass, LV_STATE_FOCUSED);
+}
+
 static void ui_show_modal(const char* ssid, bool secure) {
   const bool other = ssid == nullptr;
+  g_modal_url = false;
+  lv_textarea_set_placeholder_text(ui_ta_ssid, "Network name");
+  lv_obj_remove_flag(lv_obj_get_parent(ui_ta_pass), LV_OBJ_FLAG_HIDDEN);
+  lv_label_set_text(lv_obj_get_child(ui_connect_btn, 0), "Connect");
   lv_textarea_set_text(ui_ta_ssid, other ? "" : ssid);
   lv_textarea_set_text(ui_ta_pass, "");
   lv_textarea_set_password_mode(ui_ta_pass, true);
@@ -462,6 +507,8 @@ static void panel_open() {
   else lv_obj_remove_state(ui_flip, LV_STATE_CHECKED);
   if (g_scroll_rev) lv_obj_add_state(ui_srev, LV_STATE_CHECKED);
   else lv_obj_remove_state(ui_srev, LV_STATE_CHECKED);
+  if (g_remote) lv_obj_add_state(ui_remote, LV_STATE_CHECKED);
+  else lv_obj_remove_state(ui_remote, LV_STATE_CHECKED);
   ui_refresh_status();
   ui_fill_list();
   lv_obj_invalidate(lv_screen_active());
@@ -528,9 +575,34 @@ static void ui_setup() {
   ui_wifi = ui_label(st, "", &lv_font_montserrat_20, C_INK);
   lv_label_set_long_mode(ui_wifi, LV_LABEL_LONG_DOT);
   lv_obj_set_width(ui_wifi, lv_pct(100));
-  lv_obj_t* h2 = ui_heading(st, "ADDRESS");
-  lv_obj_set_style_margin_top(h2, 10, 0);
+  lv_obj_t* ar = lv_obj_create(st);   // the heading, and the remote mode switch at its right
+  lv_obj_set_size(ar, lv_pct(100), 32);
+  lv_obj_set_style_margin_top(ar, 4, 0);
+  lv_obj_set_style_bg_opa(ar, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(ar, 0, 0);
+  lv_obj_set_style_pad_all(ar, 0, 0);
+  lv_obj_remove_flag(ar, LV_OBJ_FLAG_SCROLLABLE);
+  ui_addr_head = ui_heading(ar, "ADDRESS");
+  lv_obj_align(ui_addr_head, LV_ALIGN_LEFT_MID, 0, 0);
+  lv_obj_t* rl = ui_label(ar, "Remote", &lv_font_montserrat_16, C_DIM);
+  lv_obj_align(rl, LV_ALIGN_RIGHT_MID, -66, 0);
+  ui_remote = lv_switch_create(ar);
+  lv_obj_set_size(ui_remote, 56, 30);
+  lv_obj_align(ui_remote, LV_ALIGN_RIGHT_MID, 0, 0);
+  lv_obj_set_style_bg_color(ui_remote, lv_color_hex(C_LINE), LV_PART_MAIN);
+  lv_obj_set_style_bg_color(ui_remote, lv_color_hex(C_ACCENT), LV_PART_INDICATOR | LV_STATE_CHECKED);
+  lv_obj_set_style_bg_color(ui_remote, lv_color_hex(0xffffff), LV_PART_KNOB);
+  lv_obj_add_event_cb(ui_remote, [](lv_event_t*) {   // on: ask for the address the first time
+    const bool on = lv_obj_has_state(ui_remote, LV_STATE_CHECKED);
+    if (on && !g_tun[0]) ui_show_url_modal();
+    else tun_set_remote(on);
+    ui_refresh_status();
+  }, LV_EVENT_VALUE_CHANGED, nullptr);
   ui_addr = ui_label(st, "", &lv_font_montserrat_28, C_ACCENT);
+  lv_label_set_long_mode(ui_addr, LV_LABEL_LONG_DOT);
+  lv_obj_set_size(ui_addr, lv_pct(100), 36);   // one line ("..." if it's longer)
+  lv_obj_add_flag(ui_addr, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_event_cb(ui_addr, [](lv_event_t*) { if (g_remote) ui_show_url_modal(); }, LV_EVENT_CLICKED, nullptr);
   lv_obj_t* h3 = ui_heading(st, "PC");
   lv_obj_set_style_margin_top(h3, 10, 0);
   lv_obj_t* pc = lv_obj_create(st);   // a dot for the state, and the words

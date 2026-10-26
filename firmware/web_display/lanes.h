@@ -62,6 +62,15 @@ static void lanes_begin() {
     l.ring = (uint8_t*)heap_caps_malloc(LANE_RING, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!l.ring) { Serial.println("lanes: no memory, one connection only"); return; }
   }
+}
+
+static void lanes_listen(bool on) {   // (off in remote mode, see tunnel.h)
+  if (!on) {
+    if (g_lane_listen >= 0) close(g_lane_listen);
+    g_lane_listen = -1;
+    return;
+  }
+  if (g_lane_listen >= 0 || !g_lanes[LANES_MAX - 1].ring) return;
   const int s = socket(AF_INET, SOCK_STREAM, 0);
   const int one = 1;
   setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));

@@ -167,31 +167,39 @@ screen and plays in a loop.
 | `--encoder E` | JPEG encoder: `auto` (default, the fastest installed), `pillow`, `numba` or `turbo+numba` |
 | `--lanes N` | TCP connections to spread the stream over (firmware 1.3 or later): `2` (default) or `1`, a single connection |
 | `--no-pacing` | videos: show frames as they arrive, without the Tab5's playout buffer |
-| `--listen [HOST:]PORT` | the Tab5 connects to the PC instead, through a tunnel of your own; see below |
+| `--listen [HOST:]PORT` | for the Tab5's remote mode: it connects to the PC, through a tunnel of your own; see below |
+| `--pair CODE`, `--devices`, `--unpair CODE` | allow a Tab5 asking to pair, list the paired ones, forget one (remote mode) |
 | `--show` | also open a visible browser window |
 | `-v` | log every update |
 | `--version` | print the version |
 
-### Away from home: `--listen`
+### Away from home: `--listen` and remote mode
 
-Normally the server connects to the Tab5 on your network. With `--listen PORT` it's the other way round: the Tab5
-connects out to the PC, through a tunnel or reverse proxy that you set up to that port (a
+Normally the server connects to the Tab5 on your network. In **remote mode** it's the other way round: the Tab5
+connects out to the PC, through a tunnel or reverse proxy that you set up (a
 [Cloudflare Tunnel](https://developers.cloudflare.com/tunnel/), ngrok, Tailscale Funnel, nginx, ...), so it works
 on any WiFi that reaches it.
 
-```
-server.py --listen 8790
-listening for the Tab5 on http://127.0.0.1:8790. Point your tunnel there; then on the Tab5 (serial): tunnel https://<your tunnel>/<key>
-```
+1. On the PC: `server.py --listen 8790`, and point your tunnel at `http://127.0.0.1:8790` (`--listen 0.0.0.0:8790`
+   takes connections from other machines too).
+2. On the Tab5: settings, turn on **Remote** and enter the tunnel's address, which must start with `https://`
+   (or on the serial console: `tunnel https://tab5.example.com`). It is kept across restarts.
+3. The first time, pair the Tab5 with the PC: the Tab5 shows a six-digit code, and the server asks on its terminal
+   `Pair the Tab5 with code 482 913? [y/N]`. Answer `y` if the codes match.
 
-Point the tunnel at `http://127.0.0.1:8790` (`--listen 0.0.0.0:8790` takes connections from other machines too), and
-give the Tab5 the tunnel's address with the printed key added, once, on its serial console:
-`tunnel https://tab5.example.com/<key>`. The Tab5 keeps it, and still works on the PC's network as before.
+**Pairing:** each Tab5 has a random ID, made once and sent with every connection over https. A Tab5 the PC doesn't
+know gets nothing until it is allowed, and a refused one asks again a minute later. Several Tab5s can be paired.
+- Without a terminal (the server running as a service), allow it from another one: `server.py --pair 482913`.
+- A Tab5 plugged in by USB when the server starts is paired at once.
+- `server.py --devices` lists the paired Tab5s; `server.py --unpair 482913` forgets one. They are kept in
+  `~/.local/share/tab5-web-display-devices.json` (hashes of their IDs).
+- Erasing the Tab5's settings (`forget`) gives it a new ID, so it pairs again.
 
-- **The key** is random, made once and kept in `~/.local/share/tab5-web-display-key`. Without it nothing gets in,
-  so keep it to yourself; delete the file for a new one.
-- **Connection:** a WebSocket over HTTPS (the server's certificate is checked) for `https://` addresses, plain for
-  `http://` ones (for a VPN or the local network).
+**While remote mode is on** the Tab5 takes no connections from the local network, so on a public network nobody
+there can take its screen or read what is typed on it. Turn Remote off at home to use the local network again; the
+address is kept. (On the local network there is no pairing.)
+
+- **Connection:** a WebSocket over HTTPS, with the server's certificate checked.
 - **Speed:** measured through Cloudflare's network, a tap's response took 132 ms (124 ms on the local network) and
   a heavy video played at 25-27 fps (30). It is one connection, without lanes: TLS needs the Tab5's internal memory.
 - **Sound** goes along inside the same connection.
@@ -223,7 +231,8 @@ are, e.g. "2 / 3 · Page title".
 - **WiFi:**
   - The scan list is sorted strongest first, with "Other network ..." for hidden networks.
   - A network is saved only once it connects. If a new one fails, the Tab5 goes back to the previous network.
-- **Status:** the Tab5's address and the server command.
+- **Status:** the Tab5's address and the server command; with **Remote** on, the remote server's address (tap it
+  to change it) and the pairing code (see `--listen`).
 - **Battery** (top right): charge level, whether it is charging, voltage and current, and a rough time to full
   or time left.
 - **Display and sound:** brightness, volume, keyboard lights (left end: off), flip 180°, and reverse scrolling
@@ -412,7 +421,7 @@ USB serial at 115200 baud:
 |---|---|
 | `ip` | print the Tab5's IP address |
 | `wifi <ssid> <password>` | join a network |
-| `tunnel <address>`, `tunnel off` | connect out to the PC through a tunnel (see `--listen`) |
+| `tunnel <https address>`, `tunnel on`, `tunnel off` | remote mode: connect out to the PC through a tunnel (see `--listen`); `tunnel` shows it and the pairing code |
 | `panel` | open the settings |
 | `rot` | flip the screen 180° |
 | `rot auto` | forget the saved rotation: from the next start it follows the keyboard |

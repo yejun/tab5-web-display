@@ -31,6 +31,7 @@ import itertools
 import json
 import os
 import pathlib
+import re
 import shutil
 import signal
 import socket
@@ -150,6 +151,40 @@ def find_serial_port():
         raise SystemExit("No Tab5 found on USB. Connect it, or pass its address with --device <ip> "
                          "(shown in the Tab5's settings: swipe in from any screen edge).")
     return ports[0]
+
+
+def pair_over_usb(port):
+    """Pair the Tab5 plugged in by USB with server/tunnel.py's bridge (it shows the hash of its ID, which is what the
+    bridge keeps). Returns its pairing code, or None without a Tab5 there."""
+    import serial
+    import tunnel
+    from serial.tools import list_ports
+    ports = [port] if port else [p.device for p in list_ports.comports() if p.vid == ESPRESSIF_USB_VID]
+    if not ports:
+        return None
+    s = serial.Serial()
+    s.port, s.baudrate, s.timeout = ports[0], 115200, 0.2
+    s.dtr = s.rts = True
+    try:
+        s.open()
+        s.reset_input_buffer()
+        end, buf, asked = time.monotonic() + 4, b"", 0
+        while time.monotonic() < end:
+            if asked < 2 and time.monotonic() > end - 4 + 2 * asked:   # (asked again once, in case it was missed)
+                s.write(b"\ntunnel id\n")
+                asked += 1
+            buf += s.read(256)
+            m = re.search(rb"tunnel: device ([0-9a-f]{64}) code", buf)
+            if m:
+                h = m.group(1).decode()
+                if h not in tunnel.load(tunnel.DEVICES_FILE):
+                    tunnel.add_device(h, "over USB")
+                return tunnel.pairing_code(h)
+    except OSError:
+        pass
+    finally:
+        s.close()
+    return None
 
 
 def device_ip_from_serial(port):
@@ -1659,8 +1694,11 @@ async def main():
     ap.add_argument("--port", help="Tab5 USB serial port, used to find its IP (default: found automatically)")
     ap.add_argument("--listen", metavar="[HOST:]PORT",
                     help="let the Tab5 connect to this PC instead, through a tunnel or reverse proxy you set up to "
-                         "this address (host default 127.0.0.1), from any network; prints the key for the Tab5's "
-                         "address (serial: tunnel <address>). See server/tunnel.py")
+                         "this address (host default 127.0.0.1), from any network: the Tab5's remote mode. A Tab5 it "
+                         "doesn't know asks to pair first. See server/tunnel.py")
+    ap.add_argument("--pair", metavar="CODE", help="allow the Tab5 asking to pair with this code (with --listen running)")
+    ap.add_argument("--devices", action="store_true", help="list the Tab5s paired for --listen")
+    ap.add_argument("--unpair", metavar="CODE", help="forget a Tab5 paired for --listen")
     what = ap.add_mutually_exclusive_group()
     what.add_argument("--app", default="home", help=f"built-in app: {', '.join(APPS)} (default home)")
     what.add_argument("--url", help="any web page")
@@ -1691,6 +1729,15 @@ async def main():
     ap.add_argument("--show", action="store_true", help="show the browser window too (for debugging)")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
+    if args.pair or args.devices or args.unpair:
+        import tunnel
+        if args.pair:
+            tunnel.pair_command(args.pair)
+        elif args.devices:
+            tunnel.devices_command()
+        else:
+            tunnel.unpair_command(args.unpair)
+        return
 
     video = None
     if args.url:
@@ -1723,7 +1770,11 @@ async def main():
     if args.listen:   # the bridge in server/tunnel.py stands in for the Tab5 on 127.0.0.1
         import tunnel
         listen = tunnel.parse_listen(args.listen)
-        print(tunnel.how_to(listen, await tunnel.start(listen, args.verbose)))
+        await tunnel.start(listen, args.verbose)
+        code = pair_over_usb(args.port)
+        if code:
+            print(f"paired the Tab5 on USB (code {code})")
+        print(tunnel.how_to(listen))
         host = "127.0.0.1"
     else:
         host = args.device or device_ip_from_serial(args.port or find_serial_port())

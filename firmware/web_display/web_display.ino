@@ -35,14 +35,14 @@
 // Each rectangle is decoded by the P4's hardware JPEG engine to RGB565 and rotated into the panel's portrait
 // frame buffer by the PPA (both DMA, the CPU only waits).
 //
-// Settings (WiFi, brightness, volume, flip): swipe in from the top edge (from any edge with a PC that doesn't take
+// Settings (WiFi, remote server, brightness, volume, flip): swipe in from the top edge (from any edge with a PC that doesn't take
 // gestures, and while no page is shown), or tap the screen while no page is shown. The panel
 // (settings_ui.h, LVGL) also opens by itself when no WiFi network is configured or the saved one can't be joined.
 //
 // Away from the PC's network, the Tab5 can reach the PC through a tunnel the user sets up instead: tunnel.h.
 //
 // Serial commands: ip | wifi <ssid> <password> | wifiinfo | rot | rot auto | S (stats) | F (dump the frame buffer, see tools/shot.py)
-//                  | tunnel <address> | tunnel off (tunnel.h)
+//                  | tunnel [<https address> | on | off | id] (remote server, tunnel.h)
 //                  | T <x> <y> (scripted tap) | drag <x0> <y0> <x1> <y1> [ms] | pinch <cx> <cy> <d0> <d1> [ms]
 //                  | three <x0> <x1> <y> [ms] (three-finger swipe) | mouse <dx> <dy> [buttons] [wheel] (scripted mouse)
 //                  | simd (check and time the pointer's SIMD blend)
@@ -85,8 +85,10 @@ static_assert(sizeof(RectHeader) == 16 && sizeof(Event) == 8, "wire format");
 
 static Preferences prefs;
 static String g_ssid, g_pass;               // the saved network
-static char g_tun[160] = "";                // the tunnel's address, "" = off (tunnel.h)
+static char g_tun[160] = "";                // the remote server's address (tunnel.h)
+static bool g_remote = false;               // remote mode: connect to it, and take no local connections
 static void tun_split(const char* addr, char* host, size_t hn, char* prefix, size_t pn);
+static void tun_status_line(char* b, size_t n);
 static int g_rot = 1;                       // 1 = landscape, 3 = upside down
 static uint8_t g_bri = 160;
 static uint16_t* g_fb = nullptr;
@@ -177,11 +179,15 @@ static void status_screen() {
                           show_status(a, "Retrying every 30 s"); break;
     case WIFI_UP: {
       const String ip = WiFi.localIP().toString();
-      snprintf(a, sizeof(a), "Waiting for the PC at %s", ip.c_str());
-      char host[96], prefix[64];
-      tun_split(g_tun, host, sizeof(host), prefix, sizeof(prefix));
-      if (g_tun[0]) snprintf(b, sizeof(b), "... or through the tunnel %s", host);
-      else snprintf(b, sizeof(b), "On the PC:  python server/server.py --device %s", ip.c_str());
+      if (g_remote) {
+        char host[96], prefix[64];
+        tun_split(g_tun, host, sizeof(host), prefix, sizeof(prefix));
+        snprintf(a, sizeof(a), "Waiting for the PC at %s", host);
+        tun_status_line(b, sizeof(b));
+      } else {
+        snprintf(a, sizeof(a), "Waiting for the PC at %s", ip.c_str());
+        snprintf(b, sizeof(b), "On the PC:  python server/server.py --device %s", ip.c_str());
+      }
       show_status(a, b);
       break;
     }
@@ -418,7 +424,6 @@ static bool handle_rect() {
 // A PC connected, over the network (lan) or through the tunnel (nullptr), after drop_client(): the newest one wins.
 static void pc_attach(WiFiClient* lan) {
   if (lan) {
-    tun_close();   // the waiting WebSocket holds 17 KB of internal RAM, which video on the lanes needs (reopened after)
     g_client = *lan;
     g_client.setNoDelay(true);
     g_pc_ip = (uint32_t)g_client.remoteIP();
@@ -435,8 +440,23 @@ static void pc_attach(WiFiClient* lan) {
   if (!lan && TUN_LANES && g_lane_listen >= 0) tun_lanes_open();
 }
 
+// The PC connects over the network (not in remote mode: tunnel.h)
+static bool g_listening = false;
+static void local_listen(bool on) {
+  if (on == g_listening) return;
+  if (on) {
+    g_server.begin();
+    g_server.setNoDelay(true);
+  } else {
+    g_server.end();
+  }
+  lanes_listen(on);
+  g_listening = on;
+}
+
 static void pc_poll() {
-  WiFiClient incoming = g_server.accept();
+  if (!g_have_client && !g_panel_open && tun_ui_changed()) status_screen();   // (connecting, pairing)
+  WiFiClient incoming = g_listening ? g_server.accept() : WiFiClient();
   if (incoming) {
     if (g_panel_open) {
       incoming.stop();   // the PC retries every 2 s; it gets a full frame once we're back
@@ -459,7 +479,7 @@ static void pc_poll() {
     drop_client();
     Serial.println("PC disconnected");
     if (!g_panel_open) {
-      if (had_page) {
+      if (had_page && !g_remote) {
         char msg[96];
         snprintf(msg, sizeof(msg), "PC disconnected - waiting at %s:%u", WiFi.localIP().toString().c_str(), PORT);
         show_status(msg, "", true);
@@ -531,7 +551,6 @@ static void wifi_start(const String& ssid, const String& pass) {
 }
 
 static void wifi_poll() {
-  static bool listening = false;
   const wl_status_t st = WiFi.status();
   const int64_t now = now_ms();
   switch (g_wifi) {
@@ -544,7 +563,7 @@ static void wifi_poll() {
           prefs.putString("ssid", g_ssid);
           prefs.putString("pass", g_pass);
         }
-        if (!listening) { g_server.begin(); g_server.setNoDelay(true); listening = true; }
+        local_listen(!g_remote);
         audio_start();
         g_wifi_sleep = !g_wifi_sleep;   // force the next call to apply
         set_wifi_sleep(true);
@@ -888,13 +907,13 @@ static void handle_serial() {
       Serial.println("rotation: none saved, chosen at the next start");
     } else if (line == "tlsbench") {
       tun_bench();
-    } else if (line.startsWith("tunnel ")) {
-      tun_set(line.substring(7));
+    } else if (line == "tunnel" || line.startsWith("tunnel ")) {
+      tun_command(line.length() > 7 ? line.substring(7) : String());
     } else if (line.startsWith("wifi ")) {
       const int sp = line.indexOf(' ', 5);
       wifi_start(sp > 0 ? line.substring(5, sp) : line.substring(5), sp > 0 ? line.substring(sp + 1) : "");
     } else if (line.length()) {
-      Serial.println("commands: ip | wifi <ssid> <password> | wifiinfo | rot | rot auto | S | F | T <x> <y> | drag x0 y0 x1 y1 [ms] | pinch cx cy d0 d1 [ms] | three x0 x1 y [ms] | mouse dx dy [buttons] [wheel] | tunnel <address> | tunnel off | panel | simd | beep | forget");
+      Serial.println("commands: ip | wifi <ssid> <password> | wifiinfo | rot | rot auto | S | F | T <x> <y> | drag x0 y0 x1 y1 [ms] | pinch cx cy d0 d1 [ms] | three x0 x1 y [ms] | mouse dx dy [buttons] [wheel] | tunnel [<https address> | on | off | id] | panel | simd | beep | forget");
     }
     line = "";
   }
