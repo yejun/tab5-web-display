@@ -19,6 +19,7 @@
 #include <atomic>
 #include <lwip/sockets.h>
 #include <freertos/semphr.h>
+#include <freertos/message_buffer.h>
 
 static constexpr int AUDIO_RATE = 48000;
 static constexpr int AUDIO_RING = 1 << 15;            // frames buffered at most (683 ms)
@@ -41,6 +42,10 @@ static std::atomic<bool> g_audio_want{false};         // a stream is buffering o
 static std::atomic<bool> g_spk_ready{false};          // the speaker is on (set by the main loop)
 static std::atomic<uint32_t> g_audio_last_ms{0};      // when the last sound packet arrived
 static SemaphoreHandle_t g_spk_lock;                  // held around playRaw() and Speaker.end()
+// Through the tunnel (tunnel.h) the datagrams come in a message buffer instead of on the socket
+static std::atomic<bool> g_audio_tunnel{false};
+static MessageBufferHandle_t g_audio_mb;
+static StaticMessageBuffer_t g_audio_mb_struct;
 static uint8_t g_vol = 180;
 
 // ---- the audio task -----------------------------------------------------------------------------------------
@@ -180,12 +185,19 @@ static void audio_task(void*) {
     }
     sockaddr_in from = {};
     socklen_t fl = sizeof(from);
-    const int n = recvfrom(s, pkt, sizeof(pkt), 0, (sockaddr*)&from, &fl);
-    if (n >= (int)sizeof(AudioHeader)) {
+    int n;
+    bool ok;   // from the connected PC
+    if (g_audio_tunnel) {
+      n = (int)xMessageBufferReceive(g_audio_mb, pkt, sizeof(pkt), pdMS_TO_TICKS(timeout_ms));
+      ok = true;
+    } else {
+      n = recvfrom(s, pkt, sizeof(pkt), 0, (sockaddr*)&from, &fl);
+      ok = from.sin_addr.s_addr == g_pc_ip.load() && g_pc_ip.load() != 0;
+    }
+    if (n >= (int)sizeof(AudioHeader) && ok) {
       AudioHeader h;
       memcpy(&h, pkt, sizeof(h));
-      if (memcmp(h.magic, "TAUD", 4) == 0 && n == (int)(sizeof(h) + h.frames * 4u) && h.frames > 0 &&
-          from.sin_addr.s_addr == g_pc_ip.load() && g_pc_ip.load() != 0)
+      if (memcmp(h.magic, "TAUD", 4) == 0 && n == (int)(sizeof(h) + h.frames * 4u) && h.frames > 0)
         audio_packet(h, (const int16_t*)(pkt + sizeof(h)));
     }
     audio_feed();
@@ -206,6 +218,9 @@ static void audio_setup() {
   g_vol = prefs.getUChar("vol", 180);
   g_spk_lock = xSemaphoreCreateMutex();
   g_ring = (int16_t*)heap_caps_calloc(AUDIO_RING * 2, sizeof(int16_t), MALLOC_CAP_SPIRAM);
+  constexpr size_t MB = 32 * 1024;   // ~20 datagrams
+  if (uint8_t* mb = (uint8_t*)heap_caps_malloc(MB + 1, MALLOC_CAP_SPIRAM))
+    g_audio_mb = xMessageBufferCreateStatic(MB, mb, &g_audio_mb_struct);
   for (auto& b : g_blocks) b = (int16_t*)heap_caps_calloc(AUDIO_BLOCK * 2, sizeof(int16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
 }
 

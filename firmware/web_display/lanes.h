@@ -22,9 +22,11 @@ static constexpr uint16_t LANE_PORT = 8766;
 static constexpr uint32_t LANE_RING = 1 << 20;        // per lane, in PSRAM (a power of two)
 static constexpr uint32_t LANE_CHUNK_MAX = 1 << 16;
 static constexpr int64_t LANE_SETUP_MS = 3000;
+static constexpr int64_t TUN_LANE_SETUP_MS = 4500;    // through the tunnel (tunnel.h): TLS handshakes first; the PC waits 5 s
 
 struct Lane {
-  int fd = -1;
+  std::atomic<int> fd{-1};
+  bool tun = false;                                   // a tunnel lane: its task owns the connection
   uint8_t* ring = nullptr;
   std::atomic<uint32_t> wr{0}, rd{0};                 // bytes stored by the lane task / taken by the main loop
   std::atomic<bool> running{false}, failed{false};
@@ -33,6 +35,8 @@ static Lane g_lanes[LANES_MAX];
 static int g_lane_listen = -1;
 static uint16_t g_lane_token = 0;
 static int g_lanes_on = 0;                            // lanes in use; 0: the stream is on the main connection
+static bool g_tun_client = false;                     // the current PC came through the tunnel (tunnel.h)
+static std::atomic<uint32_t> g_tun_gen{0};            // moves on when the lanes close: tunnel lane tasks then end
 static uint32_t g_lane_seq = 0, g_lane_left = 0;      // the chunk being read, and its bytes still to come
 struct LaneStats { uint32_t waits, wait_ms, max_wait_ms, chunks; uint32_t lane_wait_ms[LANES_MAX];
                    uint32_t idle_max_ms, idle_lane, idle_others; };
@@ -74,13 +78,15 @@ static void lanes_begin() {
 }
 
 static void lanes_close() {
+  g_tun_gen++;
   for (Lane& l : g_lanes)
-    if (l.fd >= 0) shutdown(l.fd, SHUT_RDWR);   // makes the lane task's recv() return
+    if (l.fd >= 0 && !l.tun) shutdown(l.fd, SHUT_RDWR);   // makes the lane task's recv() return
   for (Lane& l : g_lanes) {
     for (int i = 0; l.running && i < 200; i++) delay(5);
     if (l.running) Serial.println("lanes: a lane task did not stop");
-    if (l.fd >= 0) close(l.fd);
+    if (l.fd >= 0 && !l.tun) close(l.fd);
     l.fd = -1;
+    l.tun = false;
     l.wr = l.rd = 0;
     l.failed = false;
   }
@@ -105,7 +111,7 @@ static void lanes_accept() {
     if (r <= 0) break;
     got += r;
   }
-  if (got != sizeof(h) || memcmp(h.magic, "TLAN", 4) || !g_have_client || a.sin_addr.s_addr != g_pc_ip.load() ||
+  if (got != sizeof(h) || memcmp(h.magic, "TLAN", 4) || !g_have_client || g_tun_client || a.sin_addr.s_addr != g_pc_ip.load() ||
       h.y != g_lane_token || h.x >= LANES_MAX || g_lanes[h.x].fd >= 0 || g_lanes_on) {
     close(fd);
     return;
@@ -136,7 +142,7 @@ static void lanes_start(const RectHeader& h) {
   const int n = h.x;
   bool ok = !g_lanes_on && n >= 1 && n <= LANES_MAX && h.y == g_lane_token && g_lane_listen >= 0;
   int have = 0;
-  for (const int64_t end = now_ms() + LANE_SETUP_MS; ok; delay(2)) {
+  for (const int64_t end = now_ms() + (g_tun_client ? TUN_LANE_SETUP_MS : LANE_SETUP_MS); ok; delay(2)) {
     lanes_accept();
     have = 0;
     for (int i = 0; i < n; i++) have += g_lanes[i].fd >= 0 && !g_lanes[i].failed;

@@ -167,9 +167,35 @@ screen and plays in a loop.
 | `--encoder E` | JPEG encoder: `auto` (default, the fastest installed), `pillow`, `numba` or `turbo+numba` |
 | `--lanes N` | TCP connections to spread the stream over (firmware 1.3 or later): `2` (default) or `1`, a single connection |
 | `--no-pacing` | videos: show frames as they arrive, without the Tab5's playout buffer |
+| `--listen [HOST:]PORT` | the Tab5 connects to the PC instead, through a tunnel of your own; see below |
 | `--show` | also open a visible browser window |
 | `-v` | log every update |
 | `--version` | print the version |
+
+### Away from home: `--listen`
+
+Normally the server connects to the Tab5 on your network. With `--listen PORT` it's the other way round: the Tab5
+connects out to the PC, through a tunnel or reverse proxy that you set up to that port (a
+[Cloudflare Tunnel](https://developers.cloudflare.com/tunnel/), ngrok, Tailscale Funnel, nginx, ...), so it works
+on any WiFi that reaches it.
+
+```
+server.py --listen 8790
+listening for the Tab5 on http://127.0.0.1:8790. Point your tunnel there; then on the Tab5 (serial): tunnel https://<your tunnel>/<key>
+```
+
+Point the tunnel at `http://127.0.0.1:8790` (`--listen 0.0.0.0:8790` takes connections from other machines too), and
+give the Tab5 the tunnel's address with the printed key added, once, on its serial console:
+`tunnel https://tab5.example.com/<key>`. The Tab5 keeps it, and still works on the PC's network as before.
+
+- **The key** is random, made once and kept in `~/.local/share/tab5-web-display-key`. Without it nothing gets in,
+  so keep it to yourself; delete the file for a new one.
+- **Connection:** a WebSocket over HTTPS (the server's certificate is checked) for `https://` addresses, plain for
+  `http://` ones (for a VPN or the local network).
+- **Speed:** measured through Cloudflare's network, a tap's response took 132 ms (124 ms on the local network) and
+  a heavy video played at 25-27 fps (30). It is one connection, without lanes: TLS needs the Tab5's internal memory.
+- **Sound** goes along inside the same connection.
+- Check your tunnel provider's terms before streaming video through it for long.
 
 ### Making your own pages
 
@@ -386,6 +412,7 @@ USB serial at 115200 baud:
 |---|---|
 | `ip` | print the Tab5's IP address |
 | `wifi <ssid> <password>` | join a network |
+| `tunnel <address>`, `tunnel off` | connect out to the PC through a tunnel (see `--listen`) |
 | `panel` | open the settings |
 | `rot` | flip the screen 180° |
 | `rot auto` | forget the saved rotation: from the next start it follows the keyboard |

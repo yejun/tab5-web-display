@@ -39,7 +39,10 @@
 // gestures, and while no page is shown), or tap the screen while no page is shown. The panel
 // (settings_ui.h, LVGL) also opens by itself when no WiFi network is configured or the saved one can't be joined.
 //
+// Away from the PC's network, the Tab5 can reach the PC through a tunnel the user sets up instead: tunnel.h.
+//
 // Serial commands: ip | wifi <ssid> <password> | wifiinfo | rot | rot auto | S (stats) | F (dump the frame buffer, see tools/shot.py)
+//                  | tunnel <address> | tunnel off (tunnel.h)
 //                  | T <x> <y> (scripted tap) | drag <x0> <y0> <x1> <y1> [ms] | pinch <cx> <cy> <d0> <d1> [ms]
 //                  | three <x0> <x1> <y> [ms] (three-finger swipe) | mouse <dx> <dy> [buttons] [wheel] (scripted mouse)
 //                  | simd (check and time the pointer's SIMD blend)
@@ -82,6 +85,8 @@ static_assert(sizeof(RectHeader) == 16 && sizeof(Event) == 8, "wire format");
 
 static Preferences prefs;
 static String g_ssid, g_pass;               // the saved network
+static char g_tun[160] = "";                // the tunnel's address, "" = off (tunnel.h)
+static void tun_split(const char* addr, char* host, size_t hn, char* prefix, size_t pn);
 static int g_rot = 1;                       // 1 = landscape, 3 = upside down
 static uint8_t g_bri = 160;
 static uint16_t* g_fb = nullptr;
@@ -123,6 +128,7 @@ struct Stats { uint32_t updates, rects, strips; uint64_t bytes, decode_us, ppa_u
 static Stats g_stats = {};
 
 static int64_t now_ms() { return esp_timer_get_time() / 1000; }
+static uint32_t g_int_low = UINT32_MAX;     // the lowest free internal RAM seen by loop() since the last stats
 static void panel_open();
 static void kbd_set_light(uint8_t level);
 static void ptr_erase();
@@ -172,7 +178,10 @@ static void status_screen() {
     case WIFI_UP: {
       const String ip = WiFi.localIP().toString();
       snprintf(a, sizeof(a), "Waiting for the PC at %s", ip.c_str());
-      snprintf(b, sizeof(b), "On the PC:  python server/server.py --device %s", ip.c_str());
+      char host[96], prefix[64];
+      tun_split(g_tun, host, sizeof(host), prefix, sizeof(prefix));
+      if (g_tun[0]) snprintf(b, sizeof(b), "... or through the tunnel %s", host);
+      else snprintf(b, sizeof(b), "On the PC:  python server/server.py --device %s", ip.c_str());
       show_status(a, b);
       break;
     }
@@ -256,21 +265,26 @@ static Pacing g_pace;
 struct PaceStats { uint32_t timed, late; int64_t early_ms; };
 static PaceStats g_pstats = {};
 
+static bool link_connected();   // (tunnel.h)
+static void link_write(const uint8_t* p, size_t n);
+
 static void send_event(uint8_t type, int x, int y, uint8_t flags = 0, uint16_t z = 0) {
-  if (!g_have_client || !g_client.connected()) return;
+  if (!g_have_client || !link_connected()) return;
   const Event e = {type, flags, (uint16_t)x, (uint16_t)y, z};
-  g_client.write((const uint8_t*)&e, sizeof(e));
+  link_write((const uint8_t*)&e, sizeof(e));
   g_event_sent = esp_timer_get_time() / 1000;
 }
 
 #include "lanes.h"
+#include "tunnel.h"
 
 static void drop_client() {
   ptr_erase();
   lanes_close();
-  if (g_have_client) g_client.stop();
+  if (g_have_client) link_stop();
   g_have_client = g_shown_any = false;
   g_pc_ip = 0;
+  g_audio_tunnel = false;
   g_power_mode = 0;
 }
 
@@ -278,8 +292,8 @@ static bool read_exact(uint8_t* p, size_t n) {
   if (g_lanes_on) return lanes_read(p, n);
   size_t got = 0;
   const int64_t deadline = now_ms() + 3000;
-  while (got < n && g_client.connected() && now_ms() < deadline) {
-    const int r = g_client.read(p + got, n - got);
+  while (got < n && link_connected() && now_ms() < deadline) {
+    const int r = link_read(p + got, n - got);
     if (r > 0) got += r;
     else delay(1);
   }
@@ -401,23 +415,46 @@ static bool handle_rect() {
   return true;
 }
 
+// A PC connected, over the network (lan) or through the tunnel (nullptr), after drop_client(): the newest one wins.
+static void pc_attach(WiFiClient* lan) {
+  if (lan) {
+    tun_close();   // the waiting WebSocket holds 17 KB of internal RAM, which video on the lanes needs (reopened after)
+    g_client = *lan;
+    g_client.setNoDelay(true);
+    g_pc_ip = (uint32_t)g_client.remoteIP();
+    Serial.printf("PC connected from %s\n", g_client.remoteIP().toString().c_str());
+  } else {
+    g_audio_tunnel = true;   // (sound comes from tunnel.h)
+    Serial.println("PC connected through the tunnel");
+  }
+  g_have_client = true;
+  g_multitouch = g_gestures = g_mouse_pc = false;   // until the PC asks for them
+  g_pace = {};
+  send_event(EV_HELLO, 1, 4, HELLO_SOUND | HELLO_STRIPS | (g_rot == 3 ? HELLO_FLIPPED : 0), 0);   // version 1.4.0
+  if (lan || TUN_LANES) lanes_offer();
+  if (!lan && TUN_LANES && g_lane_listen >= 0) tun_lanes_open();
+}
+
 static void pc_poll() {
   WiFiClient incoming = g_server.accept();
   if (incoming) {
-    if (g_panel_open) { incoming.stop(); return; }   // the PC retries every 2 s; it gets a full frame once we're back
-    drop_client();                                    // the newest PC connection wins
-    g_client = incoming;
-    g_client.setNoDelay(true);
-    g_have_client = true;
-    g_multitouch = g_gestures = g_mouse_pc = false;   // until the PC asks for them
-    g_pace = {};
-    g_pc_ip = (uint32_t)g_client.remoteIP();
-    Serial.printf("PC connected from %s\n", g_client.remoteIP().toString().c_str());
-    send_event(EV_HELLO, 1, 4, HELLO_SOUND | HELLO_STRIPS | (g_rot == 3 ? HELLO_FLIPPED : 0), 0);   // version 1.4.0
-    lanes_offer();
+    if (g_panel_open) {
+      incoming.stop();   // the PC retries every 2 s; it gets a full frame once we're back
+    } else {
+      drop_client();
+      pc_attach(&incoming);
+    }
+  }
+  if (tun_waiting_pc()) {
+    if (g_panel_open) {
+      tun_close();
+    } else {
+      drop_client();
+      if (tun_attach()) pc_attach(nullptr);
+    }
   }
   if (!g_have_client) return;
-  if (!g_client.connected()) {
+  if (!link_connected()) {
     const bool had_page = g_shown_any;
     drop_client();
     Serial.println("PC disconnected");
@@ -435,7 +472,7 @@ static void pc_poll() {
   // one update at a time: while the PC keeps the link busy (a video), the next one is always waiting, and touches
   // and sound must still get their turn in between
   lanes_accept();
-  if (lanes_failed()) { Serial.println("ERR lane closed"); g_client.stop(); return; }
+  if (lanes_failed()) { Serial.println("ERR lane closed"); link_stop(); return; }
   // With the stream on the lanes, the main connection only carries our events. When one is lost, nothing follows it,
   // and lwIP resends only on its retransmission timer, which is at least a second (its 500 ms ticks): measured, the
   // PC waited 1.1-1.4 s for an update's "shown" several times a minute. So while updates or touches come and go,
@@ -445,14 +482,14 @@ static void pc_poll() {
   if (g_lanes_on && now - g_event_sent >= 20 && (now - g_last_update < 500 || now - g_last_touch < 500))
     send_event(EV_NUDGE, 0, 0);
   g_update_done = false;
-  while (!g_update_done && (g_lanes_on ? lanes_ready() : g_client.available() >= (int)sizeof(RectHeader))) {
+  while (!g_update_done && (g_lanes_on ? lanes_ready() : link_available() >= (int)sizeof(RectHeader))) {
     if (g_pace.due_on) {   // a timed update: wait for its turn (it stays in the lane buffers meanwhile)
       const int64_t now = now_ms();
       if (now < g_pace.due && now - g_last_touch > PACE_TOUCH_MS) break;
       g_pace.due_on = false;
       g_pace.shown_x = 1 + (uint16_t)constrain(now - g_pace.due, (int64_t)0, (int64_t)60000);
     }
-    if (!handle_rect()) { g_client.stop(); break; }
+    if (!handle_rect()) { link_stop(); break; }
   }
 }
 
@@ -749,11 +786,15 @@ static void print_stats() {
                 (unsigned)ls.chunks, (unsigned)ls.waits, (unsigned)ls.wait_ms, (unsigned)ls.lane_wait_ms[0],
                 (unsigned)ls.lane_wait_ms[1], (unsigned)ls.max_wait_ms, (unsigned)ls.idle_max_ms,
                 (unsigned)ls.idle_lane, (unsigned)ls.idle_others);
-  Serial.printf("memory | internal free %u (lowest %u, largest block %u) | psram free %u\n",
-                (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL), (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
-                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL), (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+  tun_stats();
+  Serial.printf("memory | lowest since the last stats %u | internal free %u (lowest %u, largest block %u) | dma %u (lowest %u) | psram free %u\n",
+                (unsigned)g_int_low, (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL), (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL),
+                (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL), (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
   g_stats = {};
   g_astats = {};
+  g_int_low = UINT32_MAX;
 }
 
 static void handle_serial() {
@@ -773,6 +814,8 @@ static void handle_serial() {
       wifi_info();
     } else if (line == "panel") {
       panel_open();
+    } else if (line == "close") {   // close the settings (for scripted tests)
+      if (g_panel_open) panel_close();
     } else if (line == "forget") {         // erase all saved settings (WiFi, brightness, flip) and restart
       prefs.clear();
       Serial.println("settings erased, restarting");
@@ -843,11 +886,15 @@ static void handle_serial() {
     } else if (line == "rot auto") {   // forget the saved rotation: from the next start, it follows the keyboard
       prefs.remove("rot");
       Serial.println("rotation: none saved, chosen at the next start");
+    } else if (line == "tlsbench") {
+      tun_bench();
+    } else if (line.startsWith("tunnel ")) {
+      tun_set(line.substring(7));
     } else if (line.startsWith("wifi ")) {
       const int sp = line.indexOf(' ', 5);
       wifi_start(sp > 0 ? line.substring(5, sp) : line.substring(5), sp > 0 ? line.substring(sp + 1) : "");
     } else if (line.length()) {
-      Serial.println("commands: ip | wifi <ssid> <password> | wifiinfo | rot | rot auto | S | F | T <x> <y> | drag x0 y0 x1 y1 [ms] | pinch cx cy d0 d1 [ms] | three x0 x1 y [ms] | mouse dx dy [buttons] [wheel] | panel | simd | beep | forget");
+      Serial.println("commands: ip | wifi <ssid> <password> | wifiinfo | rot | rot auto | S | F | T <x> <y> | drag x0 y0 x1 y1 [ms] | pinch cx cy d0 d1 [ms] | three x0 x1 y [ms] | mouse dx dy [buttons] [wheel] | tunnel <address> | tunnel off | panel | simd | beep | forget");
     }
     line = "";
   }
@@ -888,6 +935,7 @@ void setup() {
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
   lanes_begin();
+  tun_setup();
   g_ssid = prefs.getString("ssid", "");
   g_pass = prefs.getString("pass", "");
   if (g_ssid.isEmpty()) panel_open();   // first start: straight to the WiFi setup
@@ -895,6 +943,7 @@ void setup() {
 }
 
 void loop() {
+  g_int_low = min(g_int_low, (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
   M5.update();
   handle_serial();
   wifi_poll();

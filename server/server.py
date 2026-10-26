@@ -17,6 +17,7 @@ the Tab5 as UDP (see firmware/web_display/audio.h). Nothing is sent while the pa
     server.py --file clip.mp4          # a video, in a loop (with ffmpeg): tap to pause, drag sideways to seek
     server.py --app dashboard --city Berlin --units metric
     server.py --url https://example.com --power-save off   # quickest response, shortest battery life
+    server.py --listen 8790            # the Tab5 anywhere, connecting through a tunnel of your own to this port
 
 The built-in apps read their settings from window.TAB5: --city/--lat/--lon/--units, plus any --set key=value
 (the clock takes --set zones=Europe/London,Asia/Tokyo,America/New_York). They need no API keys.
@@ -1656,6 +1657,10 @@ async def main():
     ap.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     ap.add_argument("--device", help="Tab5 IP address (default: ask the Tab5 over USB)")
     ap.add_argument("--port", help="Tab5 USB serial port, used to find its IP (default: found automatically)")
+    ap.add_argument("--listen", metavar="[HOST:]PORT",
+                    help="let the Tab5 connect to this PC instead, through a tunnel or reverse proxy you set up to "
+                         "this address (host default 127.0.0.1), from any network; prints the key for the Tab5's "
+                         "address (serial: tunnel <address>). See server/tunnel.py")
     what = ap.add_mutually_exclusive_group()
     what.add_argument("--app", default="home", help=f"built-in app: {', '.join(APPS)} (default home)")
     what.add_argument("--url", help="any web page")
@@ -1715,7 +1720,13 @@ async def main():
         if not sep:
             raise SystemExit(f"--set needs KEY=VALUE, got {kv!r}")
         settings[k] = v
-    host = args.device or device_ip_from_serial(args.port or find_serial_port())
+    if args.listen:   # the bridge in server/tunnel.py stands in for the Tab5 on 127.0.0.1
+        import tunnel
+        listen = tunnel.parse_listen(args.listen)
+        print(tunnel.how_to(listen, await tunnel.start(listen, args.verbose)))
+        host = "127.0.0.1"
+    else:
+        host = args.device or device_ip_from_serial(args.port or find_serial_port())
     select_encoder(args.encoder)
     print(f"JPEG encoder: {encoder}" + ("" if encoder == "turbo+numba" else
           " (faster with PyTurboJPEG and Numba installed, see the README)"))
@@ -1810,7 +1821,10 @@ async def serve(mirror, host):
             print(f"Tab5 {error}; reconnecting")
             mirror.live = False
         elif error != last_error:
-            print(f"waiting for the Tab5 at {host}: {error}")
+            if mirror.args.listen:   # (the bridge closes the connection until the Tab5 is there)
+                print("waiting for the Tab5 to connect")
+            else:
+                print(f"waiting for the Tab5 at {host}: {error}")
         last_error = error
         await asyncio.sleep(2)
 
