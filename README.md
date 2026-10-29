@@ -470,6 +470,11 @@ USB serial at 115200 baud:
 
 [MIT](LICENSE) © 2026 Yejun Yang
 
+The firmware's Tab5 Keyboard key table is from M5Stack's [M5Unit-KEYBOARD](https://github.com/m5stack/M5Unit-KEYBOARD)
+(MIT, [licence](firmware/web_display/licenses/MIT-M5Unit-KEYBOARD.txt)). Firmware images on the
+[releases page](https://github.com/yejun/tab5-web-display/releases) come with the notices of everything built into
+them, and their source.
+
 The apps include these third-party components:
 - [Inter](https://github.com/rsms/inter) by Rasmus Andersson (SIL Open Font License 1.1): cut down to Latin, in
   `server/apps/fonts/`, so the apps look the same on every PC.
