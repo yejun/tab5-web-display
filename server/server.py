@@ -45,7 +45,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from playwright.async_api import async_playwright
 
-__version__ = "1.4.1"
+__version__ = "1.5.0"
 
 W, H, TILE, PORT = 1280, 720, 16, 8765
 # Chromium's rasterisation jitters a few pixels by a few levels between frames. A tile counts as changed if some

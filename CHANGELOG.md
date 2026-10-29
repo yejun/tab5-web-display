@@ -3,6 +3,30 @@
 Versions follow [semantic versioning](https://semver.org). The firmware prints its version at boot, in the serial
 `S` statistics and in its settings panel; the server prints it at start and with `--version`.
 
+## 1.5.0 - 2026-10-28
+
+Firmware and server. Older firmware and servers work with these on the local network; remote mode needs both.
+
+- **Remote mode: use the Tab5 away from home.** The Tab5 connects out to the PC through a tunnel or reverse proxy
+  you set up (a Cloudflare Tunnel, ngrok, Tailscale Funnel, nginx, ...), so it works on any WiFi that reaches it.
+  - **On the PC:** `server.py --listen 8790`, with the tunnel pointed at `http://127.0.0.1:8790`.
+  - **On the Tab5:** the settings have a **Remote** switch next to the address; turn it on and enter the tunnel's
+    `https://` address (tap the address later to change it). Over serial: `tunnel <https address>`, `tunnel on`,
+    `tunnel off`. It is kept across restarts.
+  - **Pairing:** each Tab5 has a random ID and shows a six-digit code made from it. The server asks on its terminal
+    before taking a Tab5 it doesn't know; without a terminal, `server.py --pair <code>` allows it, and a Tab5
+    plugged in by USB when the server starts is paired at once. `--devices` lists the paired Tab5s and `--unpair`
+    forgets one.
+  - **While remote mode is on** the Tab5 takes no connections from the local network, so on a public network
+    nobody there can take its screen or read what is typed.
+  - **Sound** goes along in the same connection. Measured through Cloudflare's network: a tap's response in
+    132 ms (124 ms on the local network), a heavy video with sound at 24-27 fps (30).
+- **`server.py -v`** prints, for each touch, key, click, wheel turn or gesture, when the page took it, Chromium
+  painted, and the update was captured, encoded, sent and shown.
+- **LICENSE** is the plain MIT text, so GitHub recognises it; the README lists the bundled third-party material.
+- **Build:** `tools/build.sh` keeps the build computer's folder names out of the firmware image (in assert
+  messages, source files are named from their library or project folder).
+
 ## 1.4.1 - 2026-10-23
 
 Server only; use it with firmware 1.4.0.

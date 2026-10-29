@@ -60,7 +60,7 @@
 #include <esp_timer.h>
 #include <esp_wifi.h>
 
-static constexpr const char* FIRMWARE_VERSION = "1.4.0";
+static constexpr const char* FIRMWARE_VERSION = "1.5.0";
 static constexpr int SCR_W = 1280, SCR_H = 720;   // landscape, as the page is rendered
 static constexpr int FB_W = 720, FB_H = 1280;     // the panel's native portrait frame buffer
 static constexpr uint16_t PORT = 8765;
@@ -435,7 +435,7 @@ static void pc_attach(WiFiClient* lan) {
   g_have_client = true;
   g_multitouch = g_gestures = g_mouse_pc = false;   // until the PC asks for them
   g_pace = {};
-  send_event(EV_HELLO, 1, 4, HELLO_SOUND | HELLO_STRIPS | (g_rot == 3 ? HELLO_FLIPPED : 0), 0);   // version 1.4.0
+  send_event(EV_HELLO, 1, 5, HELLO_SOUND | HELLO_STRIPS | (g_rot == 3 ? HELLO_FLIPPED : 0), 0);   // version 1.5.0
   if (lan || TUN_LANES) lanes_offer();
   if (!lan && TUN_LANES && g_lane_listen >= 0) tun_lanes_open();
 }

@@ -9,9 +9,10 @@ Funnel, nginx, ...): the Tab5 connects out to this PC, and this stands in for th
     python server/tunnel.py --listen 8790     the same on its own, for: server.py --device 127.0.0.1 ...
 
 Pairing: each Tab5 sends its random ID (X-Tab5-Device) and shows a six-digit code made from it. A Tab5 this PC doesn't
-know gets nothing until it is allowed: asked here on the terminal ("Pair the Tab5 with code 482 913? [y/N]"), with
-server.py --pair 482913 from another one, or over USB (server.py pairs a Tab5 plugged in when it starts). The paired
-Tab5s are kept, as hashes of their IDs, in DEVICES_FILE; server.py --devices lists them, --unpair <code> removes one.
+know gets nothing until it is allowed: asked here on the terminal ("a Tab5 asks to pair, with code 482 913. Pair it?
+[y/N]"), with server.py --pair 482913 from another one, or over USB (server.py pairs a Tab5 plugged in when it
+starts). The paired Tab5s are kept, as hashes of their IDs, in DEVICES_FILE; server.py --devices lists them, --unpair
+<code> removes one.
 
 The Tab5 keeps a WebSocket open to <address>/tab5 (see firmware/web_display/tunnel.h). When server.py connects to
 127.0.0.1:8765, this says "attach" on it and joins the two: the server's bytes go to the Tab5 as binary messages, and

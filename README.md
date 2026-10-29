@@ -5,7 +5,7 @@ server renders a page in headless Chromium on your PC, sends what changed to the
 touches back to the page, along with keys from M5Stack's Tab5 Keyboard or a USB keyboard, and a USB mouse.
 Several ready-made apps are included, and you can show any URL, local HTML file or video.
 
-Version 1.4.1 (firmware 1.4.0) · MIT licence
+Version 1.5.0 · MIT licence
 
 ![Home launcher on the Tab5](docs/home.png)
 
@@ -185,7 +185,7 @@ on any WiFi that reaches it.
 2. On the Tab5: settings, turn on **Remote** and enter the tunnel's address, which must start with `https://`
    (or on the serial console: `tunnel https://tab5.example.com`). It is kept across restarts.
 3. The first time, pair the Tab5 with the PC: the Tab5 shows a six-digit code, and the server asks on its terminal
-   `Pair the Tab5 with code 482 913? [y/N]`. Answer `y` if the codes match.
+   `a Tab5 asks to pair, with code 482 913. Pair it? [y/N]`. Answer `y` if the codes match.
 
 **Pairing:** each Tab5 has a random ID, made once and sent with every connection over https. A Tab5 the PC doesn't
 know gets nothing until it is allowed, and a refused one asks again a minute later. Several Tab5s can be paired.

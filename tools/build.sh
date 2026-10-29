@@ -19,6 +19,10 @@ PORT=${2:-/dev/ttyACM0}
 SKETCH="$ROOT/firmware/web_display"
 BUILD="$ROOT/build/$CHIP"
 FLAGS="-DLV_CONF_INCLUDE_SIMPLE -I$SKETCH"   # LVGL finds firmware/web_display/lv_conf.h
+# source file names in the image (assert messages) relative to their tree, not this computer's directories
+ADATA=$(arduino-cli config get directories.data 2>/dev/null || echo "$HOME/.arduino15")
+AUSER=$(arduino-cli config get directories.user 2>/dev/null || echo "$HOME/Arduino")
+FLAGS="$FLAGS -ffile-prefix-map=$ROOT=web_display -ffile-prefix-map=$AUSER=Arduino -ffile-prefix-map=$ADATA=arduino15"
 arduino-cli compile --fqbn "$FQBN" --build-path "$BUILD" \
   --build-property "compiler.c.extra_flags=$FLAGS" --build-property "compiler.cpp.extra_flags=$FLAGS" "$SKETCH"
 if [[ "${1:-}" == "upload" ]]; then
