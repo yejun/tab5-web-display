@@ -3,6 +3,12 @@
 Versions follow [semantic versioning](https://semver.org). The firmware prints its version at boot, in the serial
 `S` statistics and in its settings panel; the server prints it at start and with `--version`.
 
+## Unreleased
+
+- **Fix (firmware): the mouse pointer's SIMD blend now uses a plain loop.** With the P4's hardware loop
+  (`esp.lp.setup`), the arrow's last 8 pixels came out wrong once in 100000 blends on a v1.x chip. The plain loop:
+  0 in 1000000, 8.5 µs instead of 7.7. Serial `simd stress N` runs N blends of new random pages against C.
+
 ## 1.5.0 - 2026-10-28
 
 Firmware and server. Older firmware and servers work with these on the local network; remote mode needs both.

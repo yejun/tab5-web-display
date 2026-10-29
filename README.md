@@ -278,9 +278,10 @@ The Tab5 powers the port from the start, which costs a little battery.
   PC. Page updates under it get the arrow blended in before they reach the screen, so it doesn't flicker over
   animations or videos. It hides when you touch the screen.
 - **Videos, and servers older than 1.4:** the left button acts as a finger (tap to pause, drag to seek).
-- **Show-off detail:** the arrow is blended with the ESP32-P4's PIE SIMD instructions, 8 pixels per instruction in
-  a hardware loop: 7.7 µs instead of 86 µs in plain C (measured on a v1.x chip). The firmware checks it against the
-  C version at every start and uses C if they ever differ; the serial `simd` command repeats the check.
+- **Show-off detail:** the arrow is blended with the ESP32-P4's PIE SIMD instructions, 8 pixels per instruction:
+  8.5 µs instead of 86 µs in plain C (measured on a v1.x chip). The firmware checks it against the C version at
+  every start and uses C if they ever differ; the serial `simd` command repeats the check. (A plain loop: with the
+  chip's hardware loop, the last 8 pixels came out wrong once in 100000 blends.)
 
 ## How it works
 
@@ -432,6 +433,7 @@ USB serial at 115200 baud:
 | `T <x> <y>`, `drag <x0> <y0> <x1> <y1> [ms]` | scripted touches, for testing without a finger |
 | `mouse <dx> <dy> [buttons] [wheel]` | a scripted USB mouse report (buttons: 1 left, 2 right, 4 middle) |
 | `simd` | check the PIE SIMD pointer blend against plain C, and time both |
+| `simd stress N` | N blends of new random pages, PIE against C: how many differ |
 | `pinch <cx> <cy> <d0> <d1> [ms]`, `three <x0> <x1> <y> [ms]` | scripted two-finger pinch, three-finger swipe |
 | `kbr <reg>`, `kbw <reg> <value>` | read / write a keyboard register (hex) |
 | `unconfigured` | behave like a first start until the next reboot |

@@ -45,7 +45,7 @@
 //                  | tunnel [<https address> | on | off | id] (remote server, tunnel.h)
 //                  | T <x> <y> (scripted tap) | drag <x0> <y0> <x1> <y1> [ms] | pinch <cx> <cy> <d0> <d1> [ms]
 //                  | three <x0> <x1> <y> [ms] (three-finger swipe) | mouse <dx> <dy> [buttons] [wheel] (scripted mouse)
-//                  | simd (check and time the pointer's SIMD blend)
+//                  | simd (check and time the pointer's SIMD blend) | simd stress N (N blends of random pages)
 //                  | panel (open the settings)
 //                  | beep (speaker check) | forget (erase saved settings and restart)
 #include <M5Unified.h>
@@ -883,6 +883,8 @@ static void handle_serial() {
       xQueueSend(g_usb_mq, &m, 0);
     } else if (line == "simd") {
       ptr_report(ptr_selftest());
+    } else if (line.startsWith("simd stress")) {
+      ptr_stress(max(1, (int)line.substring(11).toInt()));
     } else if (line == "beep") {   // speaker check: a 1 kHz tone, and the codec and amplifier state
       const bool on = speaker_on();
       g_spk_keep = now_ms() + 2000;
@@ -913,7 +915,7 @@ static void handle_serial() {
       const int sp = line.indexOf(' ', 5);
       wifi_start(sp > 0 ? line.substring(5, sp) : line.substring(5), sp > 0 ? line.substring(sp + 1) : "");
     } else if (line.length()) {
-      Serial.println("commands: ip | wifi <ssid> <password> | wifiinfo | rot | rot auto | S | F | T <x> <y> | drag x0 y0 x1 y1 [ms] | pinch cx cy d0 d1 [ms] | three x0 x1 y [ms] | mouse dx dy [buttons] [wheel] | tunnel [<https address> | on | off | id] | panel | simd | beep | forget");
+      Serial.println("commands: ip | wifi <ssid> <password> | wifiinfo | rot | rot auto | S | F | T <x> <y> | drag x0 y0 x1 y1 [ms] | pinch cx cy d0 d1 [ms] | three x0 x1 y [ms] | mouse dx dy [buttons] [wheel] | tunnel [<https address> | on | off | id] | panel | simd [stress N] | beep | forget");
     }
     line = "";
   }
