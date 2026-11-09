@@ -3,6 +3,25 @@
 Versions follow [semantic versioning](https://semver.org). The firmware prints its version at boot, in the serial
 `S` statistics and in its settings panel; the server prints it at start and with `--version`.
 
+## Unreleased
+
+- **Holiday theme for the built-in apps**, from November 15 to January 6 (`--set theme=holiday` for any time,
+  `--set theme=plain` for never): a winter evening behind the cards, brighter than the usual sky - a blue twilight
+  with stars, a moon and a green aurora, snowy hills and pines, a snow drift - with snow lying on the cards, a gold
+  accent and today in the clock's calendar as a red bauble. It is drawn once, so a still page still costs nothing
+  (`server/apps/holiday.js`).
+- **Shake the Tab5 and it snows** for 20 s - soft flakes of many sizes at three depths and slowly turning six-armed
+  crystals like the fancy clock's - while the snow on the cards grows, then melts. The flakes move 15 times a
+  second: at the browser's 60, nearly the whole screen changed every frame and went out at quality 35 and 13-20 fps;
+  at 15 it goes out at quality 85, 15 fps, about 1.1 MB/s.
+- **Dashboard:** the Hacker News headlines open the story in a new tab, and their score the discussion (swipe up
+  from the bottom edge to close it and come back).
+- **Tab hints:** a page title the hint's font can't draw (Chinese, emoji) shows the page's address instead of boxes;
+  the almanac's title is now "Tab5 almanac".
+- **Firmware:** reads the accelerometer five times a second (only the accelerometer is powered, not the gyro) and
+  sends a shake to the server, which fires a `tab5shake` event in the page. Older servers ignore it. Serial: `shake`
+  (as if shaken), `imu` (print the samples).
+
 ## 1.5.0 - 2026-10-28
 
 Firmware and server. Older firmware and servers work with these on the local network; remote mode needs both.

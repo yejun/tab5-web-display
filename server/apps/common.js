@@ -145,3 +145,18 @@ function firstDayOfWeek() {
     return info.firstDay % 7;
   } catch { return 1; }
 }
+
+// The holiday theme (holiday.js): from November 15 to January 6, or always with --set theme=holiday; --set theme=plain
+// turns it off. A page can keep its own look with <body data-theme="plain">.
+function holidayOn(d = new Date()) {
+  if (document.body.dataset.theme === "plain") return false;
+  if (TAB5.theme) return TAB5.theme === "holiday";
+  const m = d.getMonth(), day = d.getDate();
+  return m === 11 || (m === 10 && day >= 15) || (m === 0 && day <= 6);
+}
+if (holidayOn()) {
+  document.documentElement.classList.add("holiday");
+  const s = document.createElement("script");
+  s.src = "holiday.js";
+  document.body.append(s);
+}

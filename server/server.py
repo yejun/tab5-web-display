@@ -84,7 +84,9 @@ JPEG_MAX, JPEG_MAX_Q_MIN = (1 << 20) - 4096, 20
 TOUCH_QUIET_S = 0.5   # ... but only one in flight this soon after a touch, where delay matters more than frame rate
 RECT = struct.Struct("<4sHHHHI")   # "TAB5" (or "TABS", a strip), x, y, w, h, jpeg length
 EVENT = struct.Struct("<BBHHH")    # type, flags, x, y, z
-EV_DOWN, EV_MOVE, EV_UP, EV_SHOWN, EV_HELLO, EV_LANES, EV_KEY, EV_GESTURE, EV_MOUSE = 1, 2, 3, 5, 6, 7, 9, 10, 11
+EV_DOWN, EV_MOVE, EV_UP, EV_SHOWN, EV_HELLO, EV_LANES, EV_KEY, EV_GESTURE, EV_MOUSE, EV_SHAKE = 1, 2, 3, 5, 6, 7, 9, 10, 11, 12
+# The Tab5 was shaken (firmware 1.6): the page gets a "tab5shake" event on window (the built-in apps' holiday theme
+# makes it snow).
 # Gestures (firmware 1.3, when asked for): swipes in from the left / right / bottom edge (the top one opens the Tab5's
 # settings), and three fingers swiped right / left. They switch and close tabs, and go back and forward.
 GEST_LEFT, GEST_RIGHT, GEST_BOTTOM, GEST_THREE_RIGHT, GEST_THREE_LEFT = 1, 2, 3, 4, 5
@@ -653,6 +655,10 @@ class Mirror:
             title = await asyncio.wait_for(page.title(), 0.5)
         except Exception:
             title = ""
+        # the toast's font (Pillow's own) has Latin letters and punctuation only: a title in Chinese, say, or with
+        # emoji would show as boxes, so the address is shown instead
+        if any(ord(c) >= 0x250 and not 0x2000 <= ord(c) <= 0x206F for c in title):
+            title = ""
         title = title or page.url.split("//")[-1].split("/")[0] or "New tab"
         self.show_toast(f"{self.tabs.index(page) + 1} / {n}  ·  {title}" if n > 1 else title)
 
@@ -670,6 +676,13 @@ class Mirror:
                 self.show_toast("The last tab stays open")
         elif code in (GEST_THREE_RIGHT, GEST_THREE_LEFT):
             await self.history(1 if code == GEST_THREE_RIGHT else -1)   # as the browser's buttons: -> forward
+
+    async def shake(self):
+        if self.page:
+            try:
+                await asyncio.wait_for(self.page.evaluate("window.dispatchEvent(new Event('tab5shake'))"), 1)
+            except Exception:
+                pass   # page busy or navigating
 
     async def history(self, step):
         """Back (-1) or forward (+1) in the tab's history."""
@@ -849,6 +862,8 @@ class Mirror:
                     await self.gesture(*rest)
                 elif kind == EV_MOUSE:
                     await self.mouse_event(*rest)
+                elif kind == EV_SHAKE:
+                    await self.shake()
                 else:
                     await self.touch(kind, *rest)
                 if self.args.verbose and self.rx_at is not None and self.touch_at not in (None, before):
@@ -905,6 +920,11 @@ class Mirror:
                 if self.args.verbose:
                     print(f"gesture {x}")
                 self.inputs.append((EV_GESTURE, x))
+                self.input_wake.set()
+            elif kind == EV_SHAKE:
+                if self.args.verbose:
+                    print("shake")
+                self.inputs.append((EV_SHAKE,))
                 self.input_wake.set()
             elif kind == EV_MOUSE:
                 if self.args.verbose and (flags & 0x1F != self.mouse_buttons or _z):

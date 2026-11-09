@@ -44,3 +44,17 @@ button { font: inherit; font-weight: 500; color: var(--ink); background: var(--g
 button:hover { background: rgba(255, 255, 255, .10); }
 button:active { background: var(--accent); color: var(--bg); }
 button.primary { background: var(--accent); color: #06231d; border-color: transparent; font-weight: 600; }
+
+/* ---- the holiday theme (holiday.js): a winter evening, brighter than the usual sky. The glass is tinted darker
+   over it, so text stays as readable as on the plain sky. ---- */
+html.holiday { --glass: rgba(14, 26, 52, .42); --glass2: rgba(255, 255, 255, .08); --edge: rgba(225, 236, 255, .16);
+               --accent: hsl(44, 92%, 64%); --accent-soft: hsl(44, 50%, 26%); --bg: #1b2f58; }
+html.holiday body::before { display: none; }
+html.holiday .card { background: var(--grain), linear-gradient(rgba(14, 26, 52, .36), rgba(14, 26, 52, .6)); }
+html.holiday button.primary { color: #2a1d02; }
+#holiday-scene { position: absolute; inset: 0; width: 1280px; height: 720px; z-index: -2; pointer-events: none; }
+#holiday-caps { position: absolute; inset: 0; z-index: 1; pointer-events: none; }
+#holiday-caps .cap { position: absolute; overflow: visible; transform-origin: 50% 16px;
+                     filter: drop-shadow(0 2px 2px rgba(10, 20, 45, .35)); transition: transform 25s steps(25); }
+html.snowing #holiday-caps .cap { transform: scaleY(1.7); transition: transform 15s steps(15); }
+#holiday-snow { position: absolute; inset: 0; z-index: 2; pointer-events: none; }

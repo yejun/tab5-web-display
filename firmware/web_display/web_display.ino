@@ -46,6 +46,7 @@
 //                  | T <x> <y> (scripted tap) | drag <x0> <y0> <x1> <y1> [ms] | pinch <cx> <cy> <d0> <d1> [ms]
 //                  | three <x0> <x1> <y> [ms] (three-finger swipe) | mouse <dx> <dy> [buttons] [wheel] (scripted mouse)
 //                  | simd (check and time the pointer's SIMD blend)
+//                  | shake (as if shaken, shake.h) | imu (print the accelerometer, again: stop)
 //                  | panel (open the settings)
 //                  | beep (speaker check) | forget (erase saved settings and restart)
 #include <M5Unified.h>
@@ -73,7 +74,7 @@ static constexpr int EDGE = 40, SWIPE_IN = 120;           // edge swipe: start w
 static constexpr int64_t SWIPE_MS = 700;
 static constexpr int SWIPE3 = 150;                    // three fingers moved this far sideways: back / forward
 
-enum : uint8_t { EV_DOWN = 1, EV_MOVE = 2, EV_UP = 3, EV_SHOWN = 5, EV_HELLO = 6, EV_LANES = 7, EV_NUDGE = 8, EV_KEY = 9, EV_GESTURE = 10, EV_MOUSE = 11 };
+enum : uint8_t { EV_DOWN = 1, EV_MOVE = 2, EV_UP = 3, EV_SHOWN = 5, EV_HELLO = 6, EV_LANES = 7, EV_NUDGE = 8, EV_KEY = 9, EV_GESTURE = 10, EV_MOUSE = 11, EV_SHAKE = 12 };
 enum : uint8_t { GEST_LEFT = 1, GEST_RIGHT = 2, GEST_BOTTOM = 3, GEST_THREE_RIGHT = 4, GEST_THREE_LEFT = 5 };
 enum : uint8_t { HELLO_SOUND = 1, HELLO_STRIPS = 2, HELLO_FLIPPED = 4 };   // hello flags
 
@@ -640,6 +641,7 @@ static void script_touch(int x0, int y0, int x1, int y1, int ms) { g_script = {n
 #include "settings_ui.h"
 #include "keyboard.h"
 #include "usb_hid.h"
+#include "shake.h"
 
 // ---- touch on the mirrored page -------------------------------------------------------------------------------
 // Touches are forwarded to the PC, except a swipe that starts at an edge and moves inwards: that opens the settings.
@@ -881,6 +883,10 @@ static void handle_serial() {
       sscanf(line.c_str() + 6, "%d %d %d %d", &dx, &dy, &b, &w);
       const UsbMouseReport m = {(uint8_t)b, (int16_t)dx, (int16_t)dy, (int8_t)w, 0};
       xQueueSend(g_usb_mq, &m, 0);
+    } else if (line == "shake") {   // as if the Tab5 was shaken
+      shake_send();
+    } else if (line == "imu") {     // print the accelerometer's samples (again: stop)
+      g_imu_print = !g_imu_print;
     } else if (line == "simd") {
       ptr_report(ptr_selftest());
     } else if (line == "beep") {   // speaker check: a 1 kHz tone, and the codec and amplifier state
@@ -913,7 +919,7 @@ static void handle_serial() {
       const int sp = line.indexOf(' ', 5);
       wifi_start(sp > 0 ? line.substring(5, sp) : line.substring(5), sp > 0 ? line.substring(sp + 1) : "");
     } else if (line.length()) {
-      Serial.println("commands: ip | wifi <ssid> <password> | wifiinfo | rot | rot auto | S | F | T <x> <y> | drag x0 y0 x1 y1 [ms] | pinch cx cy d0 d1 [ms] | three x0 x1 y [ms] | mouse dx dy [buttons] [wheel] | tunnel [<https address> | on | off | id] | panel | simd | beep | forget");
+      Serial.println("commands: ip | wifi <ssid> <password> | wifiinfo | rot | rot auto | S | F | T <x> <y> | drag x0 y0 x1 y1 [ms] | pinch cx cy d0 d1 [ms] | three x0 x1 y [ms] | mouse dx dy [buttons] [wheel] | tunnel [<https address> | on | off | id] | panel | simd | shake | imu | beep | forget");
     }
     line = "";
   }
@@ -926,7 +932,7 @@ void setup() {
   Serial.setTxTimeoutMs(0);
   auto cfg = M5.config();
   cfg.output_power = false;
-  cfg.internal_imu = false;
+  cfg.internal_imu = true;   // the accelerometer, for shakes (shake.h)
   cfg.internal_mic = false;
   cfg.internal_spk = true;   // configured here, switched on only while sound plays (audio.h)
   M5.begin(cfg);
@@ -936,6 +942,7 @@ void setup() {
   // M5Stack's keyboard, that is flipped (as in M5Stack's own keyboard examples).
   g_kled = (uint8_t)min((int)prefs.getUChar("kled", 10), 100);
   kbd_begin();
+  shake_begin();
   const bool auto_rot = !prefs.isKey("rot");
   g_rot = auto_rot ? (kbd_present_at_boot() ? 3 : 1) : prefs.getInt("rot", 1) == 3 ? 3 : 1;
   if (auto_rot) Serial.printf("rotation %d (none saved; %s)\n", g_rot, g_rot == 3 ? "keyboard fitted" : "no keyboard");
@@ -977,6 +984,7 @@ void loop() {
   battery_poll();
   kbd_poll();
   usb_poll();
+  shake_poll();
   set_wifi_sleep(g_power_mode == 0 && !g_panel_open && now_ms() - g_last_touch > AWAKE_AFTER_TOUCH_MS &&
                  now_ms() - g_last_stream > AWAKE_AFTER_STREAM_MS && !audio_recent(AWAKE_AFTER_SOUND_MS));
   // while updates stream in, come back quickly for the next one; otherwise save power

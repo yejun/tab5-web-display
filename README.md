@@ -45,6 +45,9 @@ Version 1.5.0 · MIT licence
 - **Built-in apps that need no API keys:** a home launcher, a dashboard, a clock with calendar, sticky notes, a
   Chinese almanac (老黄历), and a touch demo with a motion test. They share one look: frosted-glass cards on a sky
   whose colours follow the weather or the time of day.
+- **Holiday theme** (November 15 to January 6): the apps stand in a winter evening, with a blue twilight sky, stars, a
+  moon and an aurora, snowy hills and pines, and snow lying on the cards. **Shake the Tab5** and it snows for 20 s:
+  soft flakes of many sizes and big six-armed crystals (firmware 1.6).
 - **Setup on the device.** A settings panel opens on first start to pick a WiFi network with an on-screen keyboard.
   Later, swipe down from the top edge to change WiFi, brightness or orientation, or to check the battery.
 - **No firewall changes.** The Tab5 listens and the PC connects out to it.
@@ -113,7 +116,7 @@ python3 -m venv .venv
 | command | shows |
 |---|---|
 | `server.py` | **Home**: a launcher for the apps below. Every app has a Home button. |
-| `server.py --app dashboard` | time, current weather, 24-hour chart, 6-day forecast, air quality, Hacker News |
+| `server.py --app dashboard` | time, current weather, 24-hour chart, 6-day forecast, air quality, Hacker News (tap a headline for the story, its score for the discussion, each in a new tab) |
 | `server.py --app clock` | big clock (tap it for seconds), month calendar, three world clocks |
 | `server.py --app notes` | sticky notes with an on-screen keyboard |
 | `server.py --app almanac` | 老黄历: lunar date, 干支, 宜/忌, 冲煞, solar terms, festivals, the twelve double-hours (in Chinese) |
@@ -149,6 +152,8 @@ screen and plays in a loop.
   it is guessed from your PC's IP address via [GeoJS](https://www.geojs.io).
 - **Units:** follow the country (°F in the US). `--units metric|imperial` overrides that.
 - **World clocks:** `--set zones=Europe/London,Asia/Tokyo,America/New_York`.
+- **Holiday theme:** on from November 15 to January 6. `--set theme=holiday` turns it on at any time, and
+  `--set theme=plain` keeps it off.
 - **Any other `--set key=value`** reaches the page as `window.TAB5.key`, so your own pages can use it too.
 - **Saved data:** notes and other browser storage live in a browser profile in `~/.local/share/tab5-web-display`.
   `--profile DIR` uses another one.
@@ -214,6 +219,8 @@ address is kept. (On the local network there is no pairing.)
   applies unless the page turns it off (`touch-action`, or a viewport meta tag with `user-scalable=no`).
 - **Battery:** mostly static pages are kindest to it. Every change costs a WiFi transfer; changing once a minute
   is better than once a second.
+- **Shaking the Tab5** (firmware 1.6) fires a `tab5shake` event on `window`:
+  `addEventListener("tab5shake", () => ...)`.
 - **Examples:** the built-in apps in `server/apps/` are plain HTML, CSS and JavaScript.
 
 ## Settings on the Tab5
@@ -432,6 +439,8 @@ USB serial at 115200 baud:
 | `T <x> <y>`, `drag <x0> <y0> <x1> <y1> [ms]` | scripted touches, for testing without a finger |
 | `mouse <dx> <dy> [buttons] [wheel]` | a scripted USB mouse report (buttons: 1 left, 2 right, 4 middle) |
 | `simd` | check the PIE SIMD pointer blend against plain C, and time both |
+| `shake` | act as if the Tab5 was shaken |
+| `imu` | print the accelerometer five times a second (again: stop) |
 | `pinch <cx> <cy> <d0> <d1> [ms]`, `three <x0> <x1> <y> [ms]` | scripted two-finger pinch, three-finger swipe |
 | `kbr <reg>`, `kbw <reg> <value>` | read / write a keyboard register (hex) |
 | `unconfigured` | behave like a first start until the next reboot |

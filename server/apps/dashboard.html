@@ -64,9 +64,14 @@
   #news .top i { width: 22px; height: 22px; border-radius: 6px; background: #ff7a2f; color: #1a0d05; font: 700 15px/22px
                  "Inter Tab5", sans-serif; text-align: center; font-style: normal; }
   #news ol { list-style: none; padding: 0; margin-top: 6px; }
-  #news li { display: flex; gap: 16px; align-items: center; height: 42px; white-space: nowrap; }
+  #news li { display: flex; align-items: center; height: 42px; white-space: nowrap; }
   #news li + li { border-top: 1px solid rgba(255, 255, 255, .06); }
-  #news .n { font-size: 17px; font-weight: 300; color: var(--faint); width: 24px; }
+  /* each headline opens its story in a new tab, its score the discussion (swipe up from the bottom to close it) */
+  #news a { display: flex; align-items: center; height: 100%; color: inherit; text-decoration: none; border-radius: 10px; }
+  #news a:active { background: rgba(255, 255, 255, .10); }
+  #news a.story { gap: 16px; flex: 1; min-width: 0; margin-left: -8px; padding: 0 8px; }
+  #news a.talk { padding: 0 8px; margin-right: -8px; }
+  #news .n { font-size: 17px; font-weight: 300; color: var(--faint); width: 24px; flex: none; }
   #news .t { overflow: hidden; text-overflow: ellipsis; flex: 1; font-size: 19px; font-weight: 500; }
   #news .m { color: var(--faint); font-size: 15px; display: flex; gap: 12px; }
   #news .m b { color: #ffa36b; font-weight: 600; }
@@ -264,12 +269,15 @@
   async function news() {
     const ids = (await getJSON("https://hacker-news.firebaseio.com/v0/topstories.json")).slice(0, 4);
     const items = await Promise.all(ids.map(id => getJSON(`https://hacker-news.firebaseio.com/v0/item/${id}.json`)));
-    const esc = s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+    const esc = s => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
     $("hn").innerHTML = items.map((it, i) => {
-      let host = "";
-      try { host = new URL(it.url).hostname.replace(/^www\./, ""); } catch { host = "news.ycombinator.com"; }
-      return `<li><span class="n num">0${i + 1}</span><span class="t">${esc(it.title)}</span>
-              <span class="m num"><span><b>▲</b> ${it.score}</span><span>${esc(host)}</span></span></li>`;
+      const talk = `https://news.ycombinator.com/item?id=${it.id}`;
+      let host = "", url = talk;   // Ask HN and the like have no link of their own: the discussion is the story
+      try { const u = new URL(it.url); if (/^https?:$/.test(u.protocol)) { url = u.href; host = u.hostname.replace(/^www\./, ""); } } catch {}
+      return `<li><a class="story" href="${esc(url)}" target="_blank"><span class="n num">0${i + 1}</span>
+              <span class="t">${esc(it.title)}</span></a>
+              <a class="talk m num" href="${talk}" target="_blank"><span><b>▲</b> ${it.score}</span>
+              <span>${esc(host || "news.ycombinator.com")}</span></a></li>`;
     }).join("");
   }
 
