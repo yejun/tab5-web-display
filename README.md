@@ -7,7 +7,7 @@ Several ready-made apps are included, and you can show any URL, local HTML file 
 
 Version 1.5.0 · MIT licence
 
-![Home launcher on the Tab5](docs/home.png)
+![Home launcher on the Tab5, in the holiday theme while it snows](docs/home.png)
 
 | | |
 |---|---|
