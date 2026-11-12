@@ -5,7 +5,7 @@ server renders a page in headless Chromium on your PC, sends what changed to the
 touches back to the page, along with keys from M5Stack's Tab5 Keyboard or a USB keyboard, and a USB mouse.
 Several ready-made apps are included, and you can show any URL, local HTML file or video.
 
-Version 1.5.0 · MIT licence
+Version 1.6.0 · MIT licence
 
 ![Home launcher on the Tab5, in the holiday theme while it snows](docs/home.png)
 

@@ -3,7 +3,9 @@
 Versions follow [semantic versioning](https://semver.org). The firmware prints its version at boot, in the serial
 `S` statistics and in its settings panel; the server prints it at start and with `--version`.
 
-## Unreleased
+## 1.6.0 - 2026-11-11
+
+Firmware and server. They work with older firmware and servers; shaking for snow needs both.
 
 - **Holiday theme for the built-in apps**, from November 15 to January 6 (`--set theme=holiday` for any time,
   `--set theme=plain` for never): a winter evening behind the cards, brighter than the usual sky - a blue twilight
