@@ -7,10 +7,11 @@
 // buffer), the pointer's part of it taken into g_ptr_under and the arrow blended into it, and then it is copied to
 // the screen by the PPA as usual: so the arrow never flickers over a video.
 //
-// The blend runs on the P4's SIMD unit (PIE: 128-bit registers q0-q7, here 8 RGB565 pixels at a time) in a hardware
-// loop. It is not needed for speed (the arrow is 1152 pixels: measured 86 us in plain C, 7.7 us with PIE, against
-// ~10 ms to decode a frame), it is there because the chip has it. ptr_selftest() checks it against the C version
-// at startup, which is used instead if they ever differ; serial "simd" runs the check again and times both.
+// The blend runs on the P4's SIMD unit (PIE: 128-bit registers q0-q7, here 8 RGB565 pixels at a time). It is not
+// needed for speed (the arrow is 1152 pixels: measured 86 us in plain C, 8.5 us with PIE, against ~10 ms to decode a
+// frame), it is there because the chip has it. ptr_selftest() checks it against the C version at startup, which is
+// used instead if they ever differ; serial "simd" runs the check again and times both, "simd stress N" runs N blends
+// of new random pages.
 #pragma once
 #include <esp_cpu.h>
 
@@ -49,7 +50,9 @@ static void ptr_blend_c(const uint16_t* bg, const uint16_t* ia, const uint16_t* 
 // The same, 8 pixels per step. Each channel is masked out in place, multiplied by 32 - a (esp.vmul.u16 shifts the
 // 32-bit products right by SAR = 5) and masked again; the three are put together and the colour added (it can't
 // carry into the next channel: each sum is at most the channel's maximum). n: a multiple of 8, 16-byte aligned arrays.
-// (PIE instructions take only the registers x8-x15 for addresses and counts, hence the register variables.)
+// (PIE instructions take only the registers x8-x15 for addresses and counts, hence the register variables.) A plain
+// loop: with the hardware loop (esp.lp.setup) a run sometimes came out wrong on a v1.x chip, its last 8 pixels (once
+// in 100000 runs of "simd stress"; 0 in 1000000 like this, for 10% more time).
 static void ptr_blend_pie(const uint16_t* bg, const uint16_t* ia, const uint16_t* fg, uint16_t* out, int n) {
   alignas(16) static const uint16_t masks[24] = {
     0xF800, 0xF800, 0xF800, 0xF800, 0xF800, 0xF800, 0xF800, 0xF800,
@@ -69,7 +72,7 @@ static void ptr_blend_pie(const uint16_t* bg, const uint16_t* ia, const uint16_t
       "esp.vld.128.ip q5, %[m], 16\n\t"   // q5-q7: the red, green and blue masks
       "esp.vld.128.ip q6, %[m], 16\n\t"
       "esp.vld.128.ip q7, %[m], 16\n\t"
-      "esp.lp.setup 0, %[steps], 1f\n\t"  // hardware loop: up to and including the instruction at 1:
+      "1:\n\t"
       "esp.vld.128.ip q0, %[bg], 16\n\t"
       "esp.vld.128.ip q1, %[ia], 16\n\t"
       "esp.vld.128.ip q2, %[fg], 16\n\t"
@@ -85,9 +88,11 @@ static void ptr_blend_pie(const uint16_t* bg, const uint16_t* ia, const uint16_t
       "esp.andq q4, q4, q7\n\t"
       "esp.orq q3, q3, q4\n\t"
       "esp.vadd.u16 q3, q3, q2\n\t"
-      "1: esp.vst.128.ip q3, %[out], 16\n\t"
-      : [bg] "+r"(r_bg), [ia] "+r"(r_ia), [fg] "+r"(r_fg), [out] "+r"(r_out), [m] "+r"(r_m)
-      : [steps] "r"(r_steps), [sar] "r"(r_sar)
+      "esp.vst.128.ip q3, %[out], 16\n\t"
+      "addi %[steps], %[steps], -1\n\t"
+      "bnez %[steps], 1b\n\t"
+      : [bg] "+r"(r_bg), [ia] "+r"(r_ia), [fg] "+r"(r_fg), [out] "+r"(r_out), [m] "+r"(r_m), [steps] "+r"(r_steps)
+      : [sar] "r"(r_sar)
       : "memory");
 }
 
@@ -185,6 +190,31 @@ static PtrTest ptr_selftest() {
     r.pie_cycles = min(r.pie_cycles, esp_cpu_get_cycle_count() - t);
   }
   return r;
+}
+
+// serial "simd stress N": N blends of new random pages into an output filled with a marker each time, against C.
+// (A check on the same data again would miss a fault that writes some pixels in the wrong place: they'd still hold
+// the right values from the run before.)
+static void ptr_stress(int runs) {
+  alignas(16) static uint16_t bg[PTR_N], a[PTR_N], b[PTR_N];
+  uint32_t seed = esp_cpu_get_cycle_count(), bad = 0, first = 0;
+  for (int run = 0; run < runs; ++run) {
+    for (int i = 0; i < PTR_N; ++i) {
+      seed = seed * 1664525 + 1013904223;
+      bg[i] = (uint16_t)(seed >> 16);
+    }
+    for (int i = 0; i < PTR_N; ++i) a[i] = 0xA5C3;
+    ptr_blend_c(bg, g_ptr_ia, g_ptr_fg, b, PTR_N);
+    ptr_blend_pie(bg, g_ptr_ia, g_ptr_fg, a, PTR_N);
+    if (memcmp(a, b, sizeof(a))) {
+      if (!bad++)
+        for (int i = 0; i < PTR_N; ++i)
+          if (a[i] != b[i]) { first = i; break; }
+    }
+    if (run % 200 == 199) vTaskDelay(1);   // (the task watchdog)
+  }
+  Serial.printf("simd stress: %u of %d runs differ%s", bad, runs, bad ? "" : "\n");
+  if (bad) Serial.printf(", the first at pixel %u\n", first);
 }
 
 static void ptr_report(const PtrTest& t) {

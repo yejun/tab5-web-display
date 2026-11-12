@@ -21,6 +21,9 @@ Versions follow [semantic versioning](https://semver.org). The firmware prints i
 - **Firmware:** reads the accelerometer five times a second (only the accelerometer is powered, not the gyro) and
   sends a shake to the server, which fires a `tab5shake` event in the page. Older servers ignore it. Serial: `shake`
   (as if shaken), `imu` (print the samples).
+- **Fix (firmware): the mouse pointer's SIMD blend now uses a plain loop.** With the P4's hardware loop
+  (`esp.lp.setup`), the arrow's last 8 pixels came out wrong once in 100000 blends on a v1.x chip. The plain loop:
+  0 in 1000000, 8.5 µs instead of 7.7. Serial `simd stress N` runs N blends of new random pages against C.
 
 ## 1.5.0 - 2026-10-28
 
