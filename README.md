@@ -169,6 +169,7 @@ screen and plays in a loop.
 | `--power-save auto\|off` | Tab5 WiFi power save. `auto` (default): off only while you touch, the page animates or sound plays. `off`: always off, for the quickest response but shorter battery life |
 | `--quality N` | JPEG quality once the page is still, default 95 (moving parts are sent rougher first) |
 | `--max-fps N` | cap on updates per second, default 60 |
+| `--capture C` | how Chromium hands over pages: `jpeg` (default: JPEG while they move, a lossless PNG once still) or `png` (always lossless, about twice the CPU) |
 | `--encoder E` | JPEG encoder: `auto` (default, the fastest installed), `pillow`, `numba` or `turbo+numba` |
 | `--lanes N` | TCP connections to spread the stream over (firmware 1.3 or later): `2` (default) or `1`, a single connection |
 | `--no-pacing` | videos: show frames as they arrive, without the Tab5's playout buffer |
@@ -302,9 +303,12 @@ PC: server/server.py                                    Tab5: firmware/web_displ
 ```
 
 **On the PC:**
-- **Frames:** Chromium streams a lossless frame whenever it repaints. Each is decoded in the background while the
-  previous one is encoded and sent (a detailed frame takes 20–40 ms to decode). The server compares it with what
-  the Tab5 shows and finds the changed 16×16 tiles.
+- **Frames:** Chromium streams a frame whenever it repaints. While the page moves, frames come as JPEG at quality
+  100, of which the server takes only the tiles that changed since the previous one (unchanged content comes out of
+  JPEG identical, so the rest keeps its exact pixels); 0.2 s after the page goes still, a lossless PNG of it. This
+  halves the CPU of both Chromium and the server compared with PNG frames throughout (`--capture png`). Frames are
+  decoded in the background while the previous one is encoded and sent. The server compares each with what the
+  Tab5 shows and finds the changed 16×16 tiles.
 - **Rectangles or strips:** small changes go out as tight rectangles. Large ones go out as full-height strips,
   already rotated into the panel's orientation, which the Tab5 decodes straight into its frame buffer. The server
   picks whichever the Tab5 draws faster.
@@ -369,12 +373,12 @@ quality. It needs the lanes (one connection's 64 KB window can't hold frames ahe
 | `turbo+numba` | `numba`, `PyTurboJPEG`, libjpeg-turbo | 4.0 / 5.7 ms | 27 % / 71 % |
 
 The Numba kernel reads a strip in its rotated order directly, and its colour conversion is exact (Pillow's double
-rounding shifts each channel by up to a level). Frame rates stay the same: the Tab5 and WiFi set them. On pages most
-of the server's time goes into decoding Chromium's lossless PNG frames: zlib, then a Numba kernel undoes the PNG
-filters straight into the frame (Pillow without Numba). About 2 ms for a plain frame (5 with Pillow), 18 ms for the
-built-in apps, whose grain makes each frame a ~1.1 MB PNG (28 ms with Pillow). Two frames are decoded at once, so a
-small animation in the apps still reaches about 55 fps (one decoder held it to ~37). Changed tiles are found by
-another kernel in one pass (0.4 ms a frame).
+rounding shifts each channel by up to a level). Frame rates stay the same: the Tab5 and WiFi set them. On pages much
+of the server's time goes into decoding Chromium's frames: a moving one is a JPEG (about 4.5 ms with libjpeg-turbo),
+a still one a lossless PNG, which zlib and a Numba kernel decode straight into the frame (Pillow without Numba):
+about 2 ms for a plain frame, 18 ms for the built-in apps, whose grain makes each frame a ~1.1 MB PNG (28 ms with
+Pillow). Two frames are decoded at once, so a small animation in the apps still reaches about 55 fps (one decoder
+held it to ~37). Changed tiles are found by another kernel in one pass (0.4 ms a frame).
 
 **Lanes (firmware 1.3):** one TCP connection to the Tab5 carries at most about 3 MB/s, because its 64 KB receive
 window is fixed in the precompiled network stack (Linux reported the connection held back by it half the time).

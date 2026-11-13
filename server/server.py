@@ -103,6 +103,18 @@ DOUBLE_CLICK_S, DOUBLE_CLICK_PX = 0.5, 4
 # page with the apps' grain arrives as a ~1.1 MB PNG that took 25-27 ms to decode in the server with Pillow (18 with
 # png_pixels): one decoder held such a page to ~37 fps although Chromium paints 60; two give ~55. Only a newer frame replaces the one shown.
 DECODERS = 2
+# Capture (--capture jpeg, the default): while the page moves, Chromium sends its frames as JPEG at quality 100, and
+# only the tiles that differ from its previous JPEG frame are taken (JPEG frames of unchanged content are identical,
+# so the rest of the frame keeps its exact pixels). Once the page has been still for CAST_LOSSLESS_S, the screencast
+# restarts in PNG, which sends one lossless frame at once (25-50 ms), in time for the exact cleanup at SETTLE_S, and
+# stays in PNG for single changes (a clock ticking); frames coming CAST_MOTION_S apart switch it back to JPEG.
+# Measured on an animated app page: Chromium 280 % of a core -> 157 %, the frame 1141 KB -> 365 KB and decoded in
+# 4.5 ms instead of 11. A JPEG frame against the lossless one: off by 1.1 levels on average, by up to ~60 at sharp
+# coloured edges (half-resolution colour), so it is used only for what moves.
+CAST_JPEG_Q = 100
+CAST_LOSSLESS_S = 0.2
+CAST_MOTION_S = 0.1
+CAST_SETTLE_S = 0.3   # after a restart: ignore the frame rate (a restart can bring a second frame)
 TOAST_S = 1.5         # a note at the top of the screen (which tab, back, ...) shows this long
 # Keys (firmware 1.3, with M5Stack's Tab5 Keyboard; 1.4 also USB keyboards): EV_KEY carries flags 1 = down / 0 = up,
 # x = a USB HID usage code, y = HID modifier bits. Each code's DOM key (unshifted, shifted), DOM code and Windows key code:
@@ -454,6 +466,17 @@ if numba:
             prev, row = row, prev
         return out
 
+    @numba.njit(cache=True, nogil=True)
+    def paste_tiles(dst, src, mask):
+        """Copy the 16x16 tiles of src that mask marks into dst."""
+        for ty in range(mask.shape[0]):
+            for tx in range(mask.shape[1]):
+                if mask[ty, tx]:
+                    for y in range(16 * ty, 16 * ty + 16):
+                        for x in range(16 * tx, 16 * tx + 16):
+                            for c in range(3):
+                                dst[y, x, c] = src[y, x, c]
+
 ENCODERS = ["pillow"] + (["numba"] if numba else []) + (["turbo+numba"] if _turbo and numba else [])
 encoder = ENCODERS[-1]
 
@@ -494,6 +517,9 @@ def select_encoder(name):
         frames[1].setflags(write=False)
         for prev, cur in itertools.product(frames, repeat=2):
             changed_tiles(prev, cur)
+            changed_tiles(prev, cur, exact=True)
+        for src in frames:
+            paste_tiles(frames[0], src, np.zeros((H // TILE, W // TILE), bool))
         buf = io.BytesIO()
         Image.new("RGB", (16, 16)).save(buf, "PNG")
         png_pixels(buf.getvalue())
@@ -683,6 +709,12 @@ class Mirror:
         self.decoding = set()         # the tasks decoding screencast frames (at most DECODERS)
         self.decode_times = []        # how long each decode took, for the stats
         self.frame = None             # newest decoded frame: what the page looks like now
+        self.cast_fmt = "png"         # the screencast's format now (see CAST_LOSSLESS_S)
+        self.cast_since = 0.0         # when it was last restarted
+        self.cast_lock = asyncio.Lock()
+        self.cast_watch = None        # the task that asks for a lossless frame once the page is still
+        self.jpeg_ref = None          # the last JPEG frame taken: the next one is compared with it
+        self.compose = threading.Lock()   # decoders take turns composing self.frame
         self.in_flight = collections.deque()   # (sent at, touch time, show time or None, size) of updates not yet shown
         self.acked = asyncio.Event()
         self.show_times = []                   # send -> shown round trips, for the stats
@@ -716,12 +748,57 @@ class Mirror:
             img = img.resize((W, H))
         return np.asarray(img)
 
+    @staticmethod
+    def decode_jpeg(data):
+        jpg = base64.b64decode(data)
+        if _turbo:
+            px = _turbo.decode(jpg, pixel_format=turbojpeg.TJPF_RGB)
+            if px.shape == (H, W, 3):
+                return px
+        img = Image.open(io.BytesIO(jpg)).convert("RGB")
+        if img.size != (W, H):
+            img = img.resize((W, H))
+        return np.asarray(img)
+
+    def decode_frame(self, data, rx):
+        """Decode a screencast frame and make it the page's look, unless a newer one got there first (in a worker
+        thread). A PNG is taken whole. Of a JPEG, only the tiles that differ from the last JPEG taken: elsewhere the
+        frame keeps what it had, exact if it came from a PNG; the first JPEG after a PNG is compared with the frame,
+        allowing for JPEG's error as for Chromium's rendering noise."""
+        jpeg = data.startswith("/9j/")
+        px = self.decode_jpeg(data) if jpeg else self.decode_png(data)
+        with self.compose:
+            if rx <= self.frame_rx:
+                return False
+            if not jpeg:
+                frame, self.jpeg_ref = px, None
+            elif self.frame is None:
+                frame = self.jpeg_ref = px
+            else:
+                ref = self.jpeg_ref
+                changed = changed_tiles(ref, px, exact=True) if ref is not None else changed_tiles(self.frame, px)
+                frame = self.frame
+                if changed.any():
+                    frame = frame.copy()
+                    if numba:
+                        paste_tiles(frame, px, changed)
+                    else:
+                        m = np.repeat(np.repeat(changed, TILE, 0), TILE, 1)
+                        frame[m] = px[m]
+                self.jpeg_ref = px
+            self.frame, self.frame_rx = frame, rx
+            return True
+
     def frame_arrived(self, data):
-        """A screencast frame (base64 PNG). It is decoded in the background, while the previous one is encoded and
-        sent: a detailed frame takes 20-40 ms to decode, and decoded only when needed it held a video in a page to
-        ~22 fps although Chromium painted 30. A frame that arrives while every decoder is busy replaces the one
-        waiting, so only the newest waits."""
-        self.latest, self.latest_rx = data, time.monotonic()
+        """A screencast frame (base64 PNG or JPEG). It is decoded in the background, while the previous one is
+        encoded and sent: a detailed frame takes 20-40 ms to decode, and decoded only when needed it held a video in
+        a page to ~22 fps although Chromium painted 30. A frame that arrives while every decoder is busy replaces the
+        one waiting, so only the newest waits."""
+        now = time.monotonic()
+        if (self.args.capture == "jpeg" and self.cast_fmt == "png" and now - self.latest_rx < CAST_MOTION_S
+                and now - self.cast_since > CAST_SETTLE_S):   # moving: JPEG
+            asyncio.create_task(self.set_cast("jpeg"))
+        self.latest, self.latest_rx = data, now
         self.frames_in += 1
         if len(self.decoding) < DECODERS:
             task = asyncio.create_task(self.decode_latest())
@@ -732,11 +809,32 @@ class Mirror:
         while self.latest is not None:
             data, self.latest, rx = self.latest, None, self.latest_rx
             t0 = time.monotonic()
-            frame = await asyncio.to_thread(self.decode_png, data)
+            taken = await asyncio.to_thread(self.decode_frame, data, rx)
             self.decode_times.append(time.monotonic() - t0)
-            if rx > self.frame_rx:   # the other decoder may have finished a newer frame first
-                self.frame, self.frame_rx = frame, rx
+            if taken:
                 self.dirty.set()
+
+    async def set_cast(self, fmt):
+        """Restart the screencast in this format; Chromium sends the page as it is at once."""
+        async with self.cast_lock:
+            if self.cast_fmt == fmt or self.cdp is None:
+                return
+            self.cast_fmt, self.cast_since, cdp = fmt, time.monotonic(), self.cdp
+            opts = {"format": fmt, "maxWidth": W, "maxHeight": H}
+            if fmt == "jpeg":
+                opts["quality"] = CAST_JPEG_Q
+            try:
+                await cdp.send("Page.stopScreencast")
+                await cdp.send("Page.startScreencast", opts)
+            except Exception:
+                pass   # the tab closed
+
+    async def watch_cast(self):
+        """In JPEG, once the page has been still for CAST_LOSSLESS_S: PNG, for the lossless frame."""
+        while True:
+            await asyncio.sleep(0.05)
+            if self.cast_fmt == "jpeg" and time.monotonic() - max(self.latest_rx, self.cast_since) >= CAST_LOSSLESS_S:
+                await self.set_cast("png")
 
     async def capture(self):
         """What the page looks like now: the newest decoded screencast frame (with the note on top, if one is
@@ -756,7 +854,7 @@ class Mirror:
         """Show this tab: its screencast, and touches and keys go to it. The previous tab's screencast stops."""
         old, cdp = self.cdp, await page.context.new_cdp_session(page)
 
-        async def on_frame(ev):   # Chromium sends a (lossless) frame whenever it paints; keep only the newest
+        async def on_frame(ev):   # Chromium sends a frame whenever it paints; keep only the newest
             if cdp is self.cdp:
                 self.frame_arrived(ev["data"])
             try:
@@ -772,7 +870,13 @@ class Mirror:
             except Exception:
                 pass
         await page.bring_to_front()   # a tab in the background is hidden: it doesn't paint, and its timers slow down
-        await cdp.send("Page.startScreencast", {"format": "png", "maxWidth": W, "maxHeight": H})
+        async with self.cast_lock:   # a new tab starts lossless (CAST_LOSSLESS_S)
+            with self.compose:
+                self.jpeg_ref = None
+            self.cast_fmt, self.cast_since = "png", time.monotonic()
+            await cdp.send("Page.startScreencast", {"format": "png", "maxWidth": W, "maxHeight": H})
+        if self.args.capture == "jpeg" and self.cast_watch is None:
+            self.cast_watch = asyncio.create_task(self.watch_cast())
         self.dirty.set()
 
     def set_lead(self, lead):
@@ -1896,6 +2000,9 @@ async def main():
     ap.add_argument("--quality", type=int, default=95,
                     help="JPEG quality once the page is still (default 95); moving parts are sent rougher first")
     ap.add_argument("--max-fps", type=float, default=60, help="cap on updates per second (default 60)")
+    ap.add_argument("--capture", choices=["jpeg", "png"], default="jpeg",
+                    help="how Chromium hands over pages: jpeg (default) while they move and a lossless png once "
+                         "still, or always png (more CPU)")
     ap.add_argument("--encoder", choices=["auto", "pillow", "numba", "turbo+numba"], default="auto",
                     help="JPEG encoder (default auto: turbo+numba with PyTurboJPEG and Numba installed, numba with "
                          "Numba, else pillow)")

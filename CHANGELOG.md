@@ -20,6 +20,13 @@ Versions follow [semantic versioning](https://semver.org). The firmware prints i
     4:2:0 strip in 1.2 ms instead of 1.7.
 
   Chromium itself still uses more CPU than the server (painting and writing a PNG for every frame).
+- **Moving pages come from Chromium as JPEG, still ones lossless: about half the CPU in all.** While a page moves,
+  Chromium hands over its frames as JPEG at quality 100 instead of PNG, and the server takes only the tiles that
+  changed since the previous JPEG frame (unchanged content comes out of JPEG identical), so the rest keeps its exact
+  pixels. 0.2 s after the page goes still, the screencast restarts in PNG, which brings one lossless frame at once,
+  before the exact cleanup: a still page ends up exact, as before. Single changes (a clock ticking) stay PNG.
+  Measured on the Tab5, server + Chromium as a share of one core: spinner 425 % -> 230 %, bouncing balls 416 ->
+  237, full-screen animation 267 -> 203, at the same frame rates (57, 49, 30 fps). `--capture png` keeps PNG only.
 
 ## 1.6.0 - 2026-11-11
 
