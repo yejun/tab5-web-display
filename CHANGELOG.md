@@ -10,6 +10,16 @@ Versions follow [semantic versioning](https://semver.org). The firmware prints i
   held them to ~37 fps although Chromium painted 60. The server now decodes two frames at once (`DECODERS`); a
   third gains nothing. Measured with `--app motion`: spinner 34-39 -> 51-56 fps, bouncing balls 32-40 -> 48-54.
   Full-screen animation (26-36) and videos are unchanged: there the link and the Tab5 set the pace.
+- **The server uses about a fifth less CPU on animated pages** (with Numba installed): measured as a share of one
+  core, spinner 179 % -> 141 %, bouncing balls 175 -> 143, full-screen animation 108 -> 79, at the same frame rates.
+  Three Numba kernels:
+  - **PNG frames** are inflated with zlib and unfiltered by a kernel straight into the frame, instead of by Pillow:
+    a grainy app frame in 18 ms instead of 28 inside the server. Other kinds of PNG still go to Pillow.
+  - **Changed tiles** are found in one pass over both frames: 0.4 ms instead of 1.7.
+  - **Strips** are converted to YCbCr walking the frame in memory order (a strip is a rotated view): a full-screen
+    4:2:0 strip in 1.2 ms instead of 1.7.
+
+  Chromium itself still uses more CPU than the server (painting and writing a PNG for every frame).
 
 ## 1.6.0 - 2026-11-11
 

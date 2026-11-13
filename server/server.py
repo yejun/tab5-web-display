@@ -40,6 +40,7 @@ import subprocess
 import sys
 import threading
 import time
+import zlib
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
@@ -99,8 +100,8 @@ MOUSE_BUTTONS = ("left", "right", "middle", "back", "forward")
 WHEEL_PX = 100        # a wheel step scrolls this far, as in Chrome
 DOUBLE_CLICK_S, DOUBLE_CLICK_PX = 0.5, 4
 # Screencast frames are decoded by this many threads at once (Pillow lets go of Python's lock while it decodes). A
-# page with the apps' grain arrives as a ~1.1 MB PNG that takes 25-27 ms to decode in the server: one decoder held
-# such a page to ~37 fps although Chromium paints 60; two give ~58. Only a newer frame replaces the one shown.
+# page with the apps' grain arrives as a ~1.1 MB PNG that took 25-27 ms to decode in the server with Pillow (18 with
+# png_pixels): one decoder held such a page to ~37 fps although Chromium paints 60; two give ~55. Only a newer frame replaces the one shown.
 DECODERS = 2
 TOAST_S = 1.5         # a note at the top of the screen (which tab, back, ...) shows this long
 # Keys (firmware 1.3, with M5Stack's Tab5 Keyboard; 1.4 also USB keyboards): EV_KEY carries flags 1 = down / 0 = up,
@@ -220,8 +221,10 @@ def changed_tiles(prev, cur, exact=False):
     at all."""
     if prev is None:
         return np.ones((H // TILE, W // TILE), bool)
-    # per-pixel difference (largest of R, G, B) in uint8, then each tile's max and sum, one axis at a time:
-    # about 2 ms per frame where widening to int16 and reducing two axes at once took 24 ms
+    if numba and prev.flags.c_contiguous and cur.flags.c_contiguous:   # one pass, ~0.4 ms
+        return tile_changes(prev, cur, 0 if exact else NOISE, 1 << 30 if exact else int(DRIFT * TILE * TILE))
+    # without Numba: per-pixel difference (largest of R, G, B) in uint8, then each tile's max and sum, one axis at a
+    # time: about 2 ms per frame where widening to int16 and reducing two axes at once took 24 ms
     d = np.maximum(prev, cur)
     d -= np.minimum(prev, cur)
     d = np.maximum(np.maximum(d[..., 0], d[..., 1]), d[..., 2]).reshape(H // TILE, TILE, W // TILE, TILE)
@@ -331,6 +334,33 @@ if numba:
                     out[cr0 + i * w + j] = (28784 * r - 24103 * g - 4681 * b + 8421376) >> 16
         return out
 
+
+    @numba.njit(cache=True, nogil=True)
+    def tv_planes_cols(px, sub):
+        """tv_planes for a strip: a rotated view, whose rows are the frame's columns. Walked in the frame's memory
+        order (down each column of the view) it takes 1.8 / 1.2 ms for a full-screen strip in 4:4:4 / 4:2:0, instead
+        of 2.7 / 1.7 reading one pixel per cache line; a rectangle is faster the usual way (1.5 / 0.8)."""
+        h, w = px.shape[0], px.shape[1]
+        cw, ch = (w // 2, h // 2) if sub == 2 else (w, h)
+        out = np.empty(h * w + 2 * cw * ch, np.uint8)
+        cb0, cr0 = h * w, h * w + cw * ch
+        for j in range(w):
+            for i in range(h):
+                r, g, b = np.int32(px[i, j, 0]), np.int32(px[i, j, 1]), np.int32(px[i, j, 2])
+                out[i * w + j] = (16829 * r + 33039 * g + 6416 * b + 1081344) >> 16
+                if sub != 2:
+                    out[cb0 + i * w + j] = (-9714 * r - 19071 * g + 28784 * b + 8421376) >> 16
+                    out[cr0 + i * w + j] = (28784 * r - 24103 * g - 4681 * b + 8421376) >> 16
+        if sub == 2:
+            for j in range(cw):
+                for i in range(ch):
+                    r = np.int32(px[2*i, 2*j, 0]) + px[2*i+1, 2*j, 0] + px[2*i, 2*j+1, 0] + px[2*i+1, 2*j+1, 0]
+                    g = np.int32(px[2*i, 2*j, 1]) + px[2*i+1, 2*j, 1] + px[2*i, 2*j+1, 1] + px[2*i+1, 2*j+1, 1]
+                    b = np.int32(px[2*i, 2*j, 2]) + px[2*i+1, 2*j, 2] + px[2*i, 2*j+1, 2] + px[2*i+1, 2*j+1, 2]
+                    out[cb0 + i * cw + j] = (-9714 * r - 19071 * g + 28784 * b + 33685504) >> 18
+                    out[cr0 + i * cw + j] = (28784 * r - 24103 * g - 4681 * b + 33685504) >> 18
+        return out
+
     @numba.njit(cache=True, nogil=True)
     def tv_ycbcr(px):
         """The TV-range YCbCr image of an RGB array, for Pillow to encode."""
@@ -344,6 +374,86 @@ if numba:
                 out[i, j, 2] = (28784 * r - 24103 * g - 4681 * b + 8421376) >> 16
         return out
 
+    @numba.njit(cache=True, nogil=True)
+    def tile_changes(prev, cur, noise, drift_sum):
+        """changed_tiles in one pass over both frames (C-contiguous), ~0.4 ms instead of 1.7: per row the bytes'
+        differences, each pixel's largest (of R, G, B), then each tile's largest and sum. Simple loops, so the first
+        one vectorises."""
+        h, w = prev.shape[0], prev.shape[1]
+        th, tw = h // 16, w // 16
+        a2, b2 = prev.reshape(h, w * 3), cur.reshape(h, w * 3)
+        peak = np.zeros((th, tw), np.int32)
+        total = np.zeros((th, tw), np.int32)
+        ad = np.empty(w * 3, np.uint8)
+        d = np.empty(w, np.int32)
+        for y in range(h):
+            ra, rb = a2[y], b2[y]
+            for k in range(w * 3):
+                ad[k] = max(ra[k], rb[k]) - min(ra[k], rb[k])
+            for x in range(w):
+                d[x] = max(ad[3 * x], ad[3 * x + 1], ad[3 * x + 2])
+            ty = y >> 4
+            for tx in range(tw):
+                m = 0
+                t = 0
+                for k in range(16 * tx, 16 * tx + 16):
+                    m = max(m, d[k])
+                    t += d[k]
+                peak[ty, tx] = max(peak[ty, tx], m)
+                total[ty, tx] += t
+        out = np.empty((th, tw), np.bool_)
+        for ty in range(th):
+            for tx in range(tw):
+                out[ty, tx] = peak[ty, tx] > noise or total[ty, tx] > drift_sum
+        return out
+
+    @numba.njit(cache=True, nogil=True)
+    def png_unfilter(raw, h, w, bpp):
+        """The RGB pixels of a PNG's inflated image data (8 bits per channel, RGB or RGBA, not interlaced): each row
+        is a filter byte and the row, filtered against the pixel to the left, the one above, or both. A loop per
+        filter type, so the common ones vectorise: 0.12 ms for a Chromium frame (every row "Up")."""
+        n = w * bpp
+        out = np.empty((h, w, 3), np.uint8)
+        flat = out.reshape(h * w * 3)
+        prev = np.zeros(n, np.uint8)
+        row = np.empty(n, np.uint8)
+        for y in range(h):
+            p = y * (n + 1) + 1
+            f = raw[p - 1]
+            if f == 0:     # none
+                for i in range(n):
+                    row[i] = raw[p + i]
+            elif f == 2:   # up
+                for i in range(n):
+                    row[i] = raw[p + i] + prev[i]
+            elif f == 1:   # sub (left)
+                for i in range(bpp):
+                    row[i] = raw[p + i]
+                for i in range(bpp, n):
+                    row[i] = raw[p + i] + row[i - bpp]
+            elif f == 3:   # average
+                for i in range(bpp):
+                    row[i] = raw[p + i] + (prev[i] >> 1)
+                for i in range(bpp, n):
+                    row[i] = raw[p + i] + ((np.int32(row[i - bpp]) + prev[i]) >> 1)
+            else:          # Paeth
+                for i in range(n):
+                    left = np.int32(row[i - bpp]) if i >= bpp else 0
+                    up = np.int32(prev[i])
+                    ul = np.int32(prev[i - bpp]) if i >= bpp else 0
+                    pa, pb, pc = abs(up - ul), abs(left - ul), abs(left + up - 2 * ul)
+                    row[i] = raw[p + i] + (left if pa <= pb and pa <= pc else (up if pb <= pc else ul))
+            if bpp == 3:
+                q = y * n
+                for i in range(n):
+                    flat[q + i] = row[i]
+            else:          # RGBA: drop the alpha
+                for x in range(w):
+                    for c in range(3):
+                        out[y, x, c] = row[4 * x + c]
+            prev, row = row, prev
+        return out
+
 ENCODERS = ["pillow"] + (["numba"] if numba else []) + (["turbo+numba"] if _turbo and numba else [])
 encoder = ENCODERS[-1]
 
@@ -351,7 +461,9 @@ encoder = ENCODERS[-1]
 def encode(pixels, quality, subsampling):
     if encoder == "turbo+numba":
         h, w = pixels.shape[:2]
-        return _turbo.encode_from_yuv(tv_planes(pixels, subsampling), h, w, quality=quality,
+        cols = abs(pixels.strides[0]) < abs(pixels.strides[1])   # a strip's rotated view
+        planes = (tv_planes_cols if cols else tv_planes)(pixels, subsampling)
+        return _turbo.encode_from_yuv(planes, h, w, quality=quality,
                                       jpeg_subsample=_TJSAMP[subsampling])
     if encoder == "numba":
         ycc = Image.fromarray(tv_ycbcr(pixels), "YCbCr")
@@ -377,6 +489,42 @@ def select_encoder(name):
             a.setflags(write=writable)
             for view in (a, a[:16, :16], a[::-1].transpose(1, 0, 2)):
                 encode(view, 90, 2)
+    if numba:   # the frame kernels too: frames are writable or not (a decoded PNG, a video frame), either side
+        frames = [np.zeros((H, W, 3), np.uint8) for _ in range(2)]
+        frames[1].setflags(write=False)
+        for prev, cur in itertools.product(frames, repeat=2):
+            changed_tiles(prev, cur)
+        buf = io.BytesIO()
+        Image.new("RGB", (16, 16)).save(buf, "PNG")
+        png_pixels(buf.getvalue())
+
+
+def png_pixels(png):
+    """A PNG's RGB pixels via zlib and the png_unfilter kernel, or None for a kind it doesn't read (Pillow does).
+    Chromium's frames are 8-bit RGB with every row "Up"-filtered; Pillow took 16.6 ms for one of the apps' grainy
+    frames, of which 11.2 ms is zlib, and this takes ~12."""
+    if png[:8] != b"\x89PNG\r\n\x1a\n":
+        return None
+    pos, idat, hdr = 8, [], None
+    while pos + 8 <= len(png):
+        n, kind = struct.unpack_from(">I4s", png, pos)
+        if kind == b"IHDR":
+            hdr = struct.unpack_from(">IIBBBBB", png, pos + 8)
+        elif kind == b"IDAT":
+            idat.append(png[pos + 8:pos + 8 + n])
+        elif kind == b"IEND":
+            break
+        pos += 12 + n
+    if hdr is None:
+        return None
+    w, h, depth, color, _, _, interlace = hdr
+    if depth != 8 or color not in (2, 6) or interlace:
+        return None
+    bpp = 3 if color == 2 else 4
+    raw = zlib.decompress(b"".join(idat))
+    if len(raw) < h * (w * bpp + 1):
+        return None
+    return png_unfilter(np.frombuffer(raw, np.uint8), h, w, bpp)
 
 
 def piece_pixels(img, piece, flipped):
@@ -560,7 +708,10 @@ class Mirror:
 
     @staticmethod
     def decode_png(data):
-        img = Image.open(io.BytesIO(base64.b64decode(data))).convert("RGB")
+        png = base64.b64decode(data)
+        if numba and (px := png_pixels(png)) is not None and px.shape == (H, W, 3):
+            return px
+        img = Image.open(io.BytesIO(png)).convert("RGB")
         if img.size != (W, H):
             img = img.resize((W, H))
         return np.asarray(img)

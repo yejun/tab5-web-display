@@ -369,10 +369,12 @@ quality. It needs the lanes (one connection's 64 KB window can't hold frames ahe
 | `turbo+numba` | `numba`, `PyTurboJPEG`, libjpeg-turbo | 4.0 / 5.7 ms | 27 % / 71 % |
 
 The Numba kernel reads a strip in its rotated order directly, and its colour conversion is exact (Pillow's double
-rounding shifts each channel by up to a level). Frame rates stay the same: the Tab5 and WiFi set them. On pages
-most of the server's time goes into decoding Chromium's lossless PNG frames: about 9 ms for a plain one, but
-25-27 ms for the built-in apps, whose grain makes each frame a ~1.1 MB PNG. Two frames are decoded at once, so a
-small animation in the apps still reaches about 55 fps (one decoder held it to ~37).
+rounding shifts each channel by up to a level). Frame rates stay the same: the Tab5 and WiFi set them. On pages most
+of the server's time goes into decoding Chromium's lossless PNG frames: zlib, then a Numba kernel undoes the PNG
+filters straight into the frame (Pillow without Numba). About 2 ms for a plain frame (5 with Pillow), 18 ms for the
+built-in apps, whose grain makes each frame a ~1.1 MB PNG (28 ms with Pillow). Two frames are decoded at once, so a
+small animation in the apps still reaches about 55 fps (one decoder held it to ~37). Changed tiles are found by
+another kernel in one pass (0.4 ms a frame).
 
 **Lanes (firmware 1.3):** one TCP connection to the Tab5 carries at most about 3 MB/s, because its 64 KB receive
 window is fixed in the precompiled network stack (Linux reported the connection held back by it half the time).
