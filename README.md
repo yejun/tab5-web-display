@@ -36,7 +36,7 @@ Version 1.6.0 · MIT licence
   - **Only the 16×16 tiles that changed are sent.** An idle page with a ticking clock costs about 1.4 KB a second.
   - **The Tab5 barely works.** Its hardware JPEG decoder does the drawing, large changes straight into the
     frame buffer.
-  - **Smooth.** Small animations run at up to 58 fps and full-screen ones at about 30; a finger-follow test shows
+  - **Smooth.** Small animations run at up to about 55 fps and full-screen ones at about 30; a finger-follow test shows
     a touch on screen in about 20–40 ms.
 - **Sound.** What the page plays comes out of the Tab5's speaker or headphone jack, about a tenth of a second
   behind the PC, the same as the picture. Needs a Linux PC with PulseAudio or PipeWire.
@@ -370,7 +370,9 @@ quality. It needs the lanes (one connection's 64 KB window can't hold frames ahe
 
 The Numba kernel reads a strip in its rotated order directly, and its colour conversion is exact (Pillow's double
 rounding shifts each channel by up to a level). Frame rates stay the same: the Tab5 and WiFi set them. On pages
-most of the server's time goes into decoding Chromium's lossless PNG frames (about 9 ms each).
+most of the server's time goes into decoding Chromium's lossless PNG frames: about 9 ms for a plain one, but
+25-27 ms for the built-in apps, whose grain makes each frame a ~1.1 MB PNG. Two frames are decoded at once, so a
+small animation in the apps still reaches about 55 fps (one decoder held it to ~37).
 
 **Lanes (firmware 1.3):** one TCP connection to the Tab5 carries at most about 3 MB/s, because its 64 KB receive
 window is fixed in the precompiled network stack (Linux reported the connection held back by it half the time).
@@ -399,10 +401,10 @@ them in order. Measured on WiFi 6: one connection 3.1 MB/s, two 4.4, three 4.8, 
 
 | scene | changed area | Tab5 fps | data |
 |---|---|---|---|
-| spinner | ~4% | 56–58 | ~300 KB/s |
+| spinner | ~2% | 51–56 | ~250 KB/s |
 | follow finger, while dragging | <1% | ~55 | ~110 KB/s |
-| bouncing balls | 20–35% | 51–54 | ~1.2 MB/s |
-| full-screen animation | 75–90% | 28–34 | ~1.9 MB/s |
+| bouncing balls | 20–35% | 48–54 | ~1.3 MB/s |
+| full-screen animation | 65–95% | 26–36 | ~1.8 MB/s |
 | video, detailed (Big Buck Bunny 720p) | 100% | ~30, evenly (quality ~45–50) | ~2.7 MB/s |
 | video, simple | ~8% | 30 (quality 85) | ~100 KB/s |
 

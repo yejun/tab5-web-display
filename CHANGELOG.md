@@ -3,6 +3,14 @@
 Versions follow [semantic versioning](https://semver.org). The firmware prints its version at boot, in the serial
 `S` statistics and in its settings panel; the server prints it at start and with `--version`.
 
+## Unreleased
+
+- **Small animations in the built-in apps are fast again: about 55 fps instead of 37.** The grain the apps got in
+  1.4 makes every frame Chromium hands over a ~1.1 MB PNG instead of ~80 KB, and decoding one takes 25-27 ms, which
+  held them to ~37 fps although Chromium painted 60. The server now decodes two frames at once (`DECODERS`); a
+  third gains nothing. Measured with `--app motion`: spinner 34-39 -> 51-56 fps, bouncing balls 32-40 -> 48-54.
+  Full-screen animation (26-36) and videos are unchanged: there the link and the Tab5 set the pace.
+
 ## 1.6.0 - 2026-11-11
 
 Firmware and server. They work with older firmware and servers; shaking for snow needs both.

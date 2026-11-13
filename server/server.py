@@ -98,6 +98,10 @@ TCFG_MULTITOUCH, TCFG_GESTURES, TCFG_MOUSE = 1, 2, 4
 MOUSE_BUTTONS = ("left", "right", "middle", "back", "forward")
 WHEEL_PX = 100        # a wheel step scrolls this far, as in Chrome
 DOUBLE_CLICK_S, DOUBLE_CLICK_PX = 0.5, 4
+# Screencast frames are decoded by this many threads at once (Pillow lets go of Python's lock while it decodes). A
+# page with the apps' grain arrives as a ~1.1 MB PNG that takes 25-27 ms to decode in the server: one decoder held
+# such a page to ~37 fps although Chromium paints 60; two give ~58. Only a newer frame replaces the one shown.
+DECODERS = 2
 TOAST_S = 1.5         # a note at the top of the screen (which tab, back, ...) shows this long
 # Keys (firmware 1.3, with M5Stack's Tab5 Keyboard; 1.4 also USB keyboards): EV_KEY carries flags 1 = down / 0 = up,
 # x = a USB HID usage code, y = HID modifier bits. Each code's DOM key (unshifted, shifted), DOM code and Windows key code:
@@ -528,7 +532,7 @@ class Mirror:
         self.rx_at, self.rx_buttons, self.traces = None, 0, {}
         self.latest_rx = self.frame_rx = 0.0
         self.latest = None            # newest screencast frame (base64 PNG) not yet decoded
-        self.decoding = None          # the task decoding screencast frames
+        self.decoding = set()         # the tasks decoding screencast frames (at most DECODERS)
         self.decode_times = []        # how long each decode took, for the stats
         self.frame = None             # newest decoded frame: what the page looks like now
         self.in_flight = collections.deque()   # (sent at, touch time, show time or None, size) of updates not yet shown
@@ -564,20 +568,24 @@ class Mirror:
     def frame_arrived(self, data):
         """A screencast frame (base64 PNG). It is decoded in the background, while the previous one is encoded and
         sent: a detailed frame takes 20-40 ms to decode, and decoded only when needed it held a video in a page to
-        ~22 fps although Chromium painted 30. Frames that arrive during a decode collapse into the newest."""
+        ~22 fps although Chromium painted 30. A frame that arrives while every decoder is busy replaces the one
+        waiting, so only the newest waits."""
         self.latest, self.latest_rx = data, time.monotonic()
         self.frames_in += 1
-        if self.decoding is None or self.decoding.done():
-            self.decoding = asyncio.create_task(self.decode_latest())
+        if len(self.decoding) < DECODERS:
+            task = asyncio.create_task(self.decode_latest())
+            self.decoding.add(task)
+            task.add_done_callback(self.decoding.discard)
 
     async def decode_latest(self):
         while self.latest is not None:
             data, self.latest, rx = self.latest, None, self.latest_rx
             t0 = time.monotonic()
-            self.frame = await asyncio.to_thread(self.decode_png, data)
-            self.frame_rx = rx
+            frame = await asyncio.to_thread(self.decode_png, data)
             self.decode_times.append(time.monotonic() - t0)
-            self.dirty.set()
+            if rx > self.frame_rx:   # the other decoder may have finished a newer frame first
+                self.frame, self.frame_rx = frame, rx
+                self.dirty.set()
 
     async def capture(self):
         """What the page looks like now: the newest decoded screencast frame (with the note on top, if one is
