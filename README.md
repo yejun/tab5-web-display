@@ -66,7 +66,7 @@ Version 1.6.0 · MIT licence
   Debian/Ubuntu, `brew install jpeg-turbo` on macOS, the libjpeg-turbo installer on Windows). The server picks the
   fastest one installed and prints which.
 - **For videos:** [ffmpeg](https://ffmpeg.org) (with `ffprobe`) on the PATH. Video sound needs no PulseAudio.
-- **To build the firmware:** [Arduino CLI](https://arduino.github.io/arduino-cli/).
+- **To build the firmware:** [Arduino CLI](https://arduino.github.io/arduino-cli/) or [PlatformIO](https://platformio.org/).
 
 ## Quick start
 
@@ -86,6 +86,14 @@ LVGL 9.6.0.
 boot. Run `esptool.py --port /dev/ttyACM0 chip_id`:
 - **"revision v1.x":** use the default build.
 - **v3.0 or later:** build with `CHIP=postv3 tools/build.sh upload`.
+
+Alternatively, with PlatformIO installed, build and upload from the project root:
+
+```sh
+pio run -e tab5-prev3 -t upload --upload-port /dev/ttyACM0
+```
+
+Use `tab5-postv3` instead for revision v3.0 or later. Omit `-t upload --upload-port /dev/ttyACM0` to build without flashing; `pio device monitor` opens the serial console.
 
 **Keep the firmware and the server at the same version.** Older and newer versions work together, but only with
 the features both have (for example, sound needs firmware 1.1 or later). The server prints the Tab5's firmware
