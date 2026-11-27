@@ -11,7 +11,7 @@ services:
     # For remote mode, point your HTTPS tunnel at http://127.0.0.1:8790.
     # ports:
     #   - "127.0.0.1:8790:8790"
-    # Pair from another terminal: docker compose exec server python server/server.py --pair CODE
+    # Pair from another terminal: docker compose exec --user app server python server/server.py --pair CODE
     # List or forget devices: replace --pair CODE with --devices or --unpair CODE.
     shm_size: 1gb
     volumes:

@@ -119,8 +119,13 @@ TAB5_DEVICE=192.168.1.50 docker compose up --build
 
 Change the address to your Tab5's IP. Browser data, including notes, is kept in the `tab5-data` Docker volume.
 To pass other server options, change `command` in `compose.yaml`. For remote mode, use
-`--listen 0.0.0.0:8790` and publish port 8790 in Compose; pairing commands can be run with
-`docker compose exec server python server/server.py --pair CODE`.
+`--listen 0.0.0.0:8790` and publish port 8790 in Compose. When the server logs a pairing request,
+check that the code matches the Tab5, then run this in another terminal, replacing the example with
+your six-digit code (without spaces):
+
+```sh
+docker compose exec --user app server python server/server.py --pair 482913
+```
 
 ## What to show
 
