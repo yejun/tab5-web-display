@@ -1,0 +1,22 @@
+services:
+  server:
+    build: .
+    command: ["--device", "${TAB5_DEVICE:?Set TAB5_DEVICE to the Tab5 IP address}"]
+    # Replace the command above with one of these examples:
+    # command: ["--listen", "0.0.0.0:8790"]  # remote mode; also enable ports below
+    # command: ["--device", "${TAB5_DEVICE}", "--app", "dashboard", "--city", "Berlin", "--units", "metric"]
+    # command: ["--device", "${TAB5_DEVICE}", "--url", "https://example.com"]
+    # command: ["--device", "${TAB5_DEVICE}", "--file", "/media/page.html"]  # also mount media below
+    # Add other options to a command, e.g. "--no-audio", "--quality", "95", "--max-fps", "30".
+    # For remote mode, point your HTTPS tunnel at http://127.0.0.1:8790.
+    # ports:
+    #   - "127.0.0.1:8790:8790"
+    # Pair from another terminal: docker compose exec server python server/server.py --pair CODE
+    # List or forget devices: replace --pair CODE with --devices or --unpair CODE.
+    shm_size: 1gb
+    volumes:
+      - tab5-data:/home/app/.local/share
+      # - ./media:/media:ro  # local HTML files or videos for --file
+
+volumes:
+  tab5-data:

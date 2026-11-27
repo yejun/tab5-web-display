@@ -111,6 +111,17 @@ python3 -m venv .venv
 
 **Browser:** if you have neither Chromium nor Chrome, run `.venv/bin/playwright install chromium` once.
 
+Alternatively, with Docker Compose, use the address shown in the Tab5's settings:
+
+```sh
+TAB5_DEVICE=192.168.1.50 docker compose up --build
+```
+
+Change the address to your Tab5's IP. Browser data, including notes, is kept in the `tab5-data` Docker volume.
+To pass other server options, change `command` in `compose.yaml`. For remote mode, use
+`--listen 0.0.0.0:8790` and publish port 8790 in Compose; pairing commands can be run with
+`docker compose exec server python server/server.py --pair CODE`.
+
 ## What to show
 
 | command | shows |
