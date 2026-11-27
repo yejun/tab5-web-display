@@ -5,8 +5,7 @@
 //
 // Remote mode is a setting (the panel, or serial: tunnel <https address> | tunnel on | tunnel off; saved). While it
 // is on, the Tab5 takes no connections from the local network: on a public network anyone could take the screen
-// and read what is typed. The address must be https: the connection is a WebSocket over TLS (port 443 unless given,
-// the server's certificate checked against the core's CA bundle).
+// and read what is typed. HTTPS uses TLS and checks the server certificate; HTTP is available when explicitly selected.
 //
 // Pairing: the Tab5 has a random 128-bit ID (made once, saved) that it sends with every connection, and a six-digit
 // code made from it, shown on its screen. The bridge asks on the PC before taking a Tab5 it doesn't know ("Pair the
@@ -152,8 +151,14 @@ static int raw_bio_send(void* ctx, const unsigned char* p, size_t n) {
   return errno == EAGAIN || errno == EWOULDBLOCK ? MBEDTLS_ERR_SSL_WANT_WRITE : MBEDTLS_ERR_NET_SEND_FAILED;
 }
 
-static int tls_rd(Ws& w, void* p, size_t n) { return esp_tls_conn_read(w.tls, p, n); }
-static int tls_wr(Ws& w, const void* p, size_t n) { return esp_tls_conn_write(w.tls, p, n); }
+static int tls_rd(Ws& w, void* p, size_t n) {
+  int r = esp_tls_conn_read(w.tls, p, n);
+  return !w.in && r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) ? ESP_TLS_ERR_SSL_WANT_READ : r;
+}
+static int tls_wr(Ws& w, const void* p, size_t n) {
+  int r = esp_tls_conn_write(w.tls, p, n);
+  return !w.in && r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) ? ESP_TLS_ERR_SSL_WANT_WRITE : r;
+}
 
 static bool ws_wait(const Ws& w, int ms) {   // until something arrives (or the socket fails)
   fd_set r;
@@ -315,11 +320,13 @@ static bool ws_open(Ws& w, const char* addr, const char* path, char* why, size_t
   char host[96];
   snprintf(host, sizeof(host), "%s", hostport);
   char* colon = strrchr(host, ':');
-  const int port = colon ? atoi(colon + 1) : 443;
+  const bool plain = !strncmp(addr, "http://", 7);
+  const int port = colon ? atoi(colon + 1) : plain ? 80 : 443;
   if (colon) *colon = 0;
   const int64_t t0 = now_ms();
   esp_tls_cfg_t cfg = {};
-  cfg.crt_bundle_attach = esp_crt_bundle_attach;
+  cfg.is_plain_tcp = plain;
+  if (!plain) cfg.crt_bundle_attach = esp_crt_bundle_attach;
   cfg.timeout_ms = TUN_OPEN_MS;
   // (not cfg.non_block: esp-tls then retries the handshake's reads in a busy loop, which starved the other tasks
   // until the task watchdog fired; the socket turns non-blocking below, once the handshake is done)
@@ -331,18 +338,20 @@ static bool ws_open(Ws& w, const char* addr, const char* path, char* why, size_t
   g_tls_big = 1;   // (nothing else goes to internal RAM)
   xSemaphoreGive(g_tls_open_lock);
   if (ok != 1) {
-    snprintf(why, whyn, "TLS connection to %s failed", host);
+    snprintf(why, whyn, "connection to %s failed", host);
     ws_close(w);
     return false;
   }
   w.dead = false;
   esp_tls_get_conn_sockfd(w.tls, &w.fd);
   fcntl(w.fd, F_SETFL, fcntl(w.fd, F_GETFL, 0) | O_NONBLOCK);
-  w.in = (RawIn*)heap_caps_calloc(1, sizeof(RawIn), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (w.in) w.in->buf = (uint8_t*)heap_caps_malloc(TUN_RAW, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (!w.in || !w.in->buf) { snprintf(why, whyn, "no memory"); ws_close(w); return false; }
-  w.in->fd = w.fd;
-  mbedtls_ssl_set_bio((mbedtls_ssl_context*)esp_tls_get_ssl_context(w.tls), w.in, raw_bio_send, raw_bio_recv, nullptr);
+  if (!plain) {
+    w.in = (RawIn*)heap_caps_calloc(1, sizeof(RawIn), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (w.in) w.in->buf = (uint8_t*)heap_caps_malloc(TUN_RAW, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!w.in || !w.in->buf) { snprintf(why, whyn, "no memory"); ws_close(w); return false; }
+    w.in->fd = w.fd;
+    mbedtls_ssl_set_bio((mbedtls_ssl_context*)esp_tls_get_ssl_context(w.tls), w.in, raw_bio_send, raw_bio_recv, nullptr);
+  }
   const int one = 1;
   setsockopt(w.fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
   uint8_t key[16], key64[32];
@@ -378,6 +387,7 @@ static bool ws_open(Ws& w, const char* addr, const char* path, char* why, size_t
 
 static const char* ws_cipher(const Ws& w) {
   if (!w.tls) return "-";
+  if (!w.in) return "HTTP";
   return mbedtls_ssl_get_ciphersuite((mbedtls_ssl_context*)esp_tls_get_ssl_context(w.tls));
 }
 
@@ -615,10 +625,10 @@ static bool tun_ui_changed() {   // has anything in that line changed?
   return changed && g_remote;
 }
 
-// Remote mode on or off (serial "tunnel ...", the panel), with a new address if one is given (https only).
+// Remote mode on or off (serial "tunnel ...", the panel), with a new address if one is given (HTTP or HTTPS).
 static bool tun_set_remote(bool on, const char* addr = nullptr) {
   if (addr) {
-    if (strncmp(addr, "https://", 8) || !addr[8]) return false;
+    if (!((!strncmp(addr, "https://", 8) && addr[8]) || (!strncmp(addr, "http://", 7) && addr[7]))) return false;
     snprintf(g_tun, sizeof(g_tun), "%s", addr);
     prefs.putString("tun", g_tun);
   }
@@ -644,7 +654,7 @@ static void tun_command(const String& arg) {   // serial "tunnel [<address> | on
     Serial.printf("tunnel: device %s code %s\n", g_dev_hash, g_dev_code);
     return;
   } else if (arg.length() && !tun_set_remote(true, arg.c_str())) {
-    Serial.println("tunnel: the address must start with https://");
+    Serial.println("tunnel: the address must start with http:// or https://");
     return;
   }
   Serial.printf("tunnel: remote mode %s, address %s, pairing code %s\n", g_remote ? "on" : "off",

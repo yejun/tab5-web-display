@@ -18,7 +18,7 @@ static lv_display_t* g_disp;
 static lv_obj_t *ui_wifi, *ui_addr, *ui_pc, *ui_pc_dot, *ui_hint, *ui_list, *ui_scan_btn, *ui_scan_lbl;
 static lv_obj_t *ui_modal, *ui_modal_title, *ui_ta_ssid, *ui_ta_pass, *ui_show_btn, *ui_msg, *ui_spinner, *ui_kb;
 static lv_obj_t *ui_connect_btn, *ui_bri, *ui_vol, *ui_kled, *ui_flip, *ui_srev, *ui_batt;
-static lv_obj_t *ui_addr_head, *ui_remote;
+static lv_obj_t *ui_addr_head, *ui_remote, *ui_unsecure_row, *ui_unsecure;
 static bool g_scanning = false, g_connect_pending = false, g_touch_block = false;
 static bool g_modal_url = false;   // the dialog is asking for the remote server's address
 static String g_pending_ssid;   // the network the dialog is joining
@@ -162,7 +162,14 @@ static void ui_refresh_status() {
     case WIFI_UP:         lv_label_set_text_fmt(ui_wifi, LV_SYMBOL_WIFI "  %s  (%d dBm)", g_ssid.c_str(), (int)WiFi.RSSI()); break;
   }
   lv_obj_set_style_text_color(ui_wifi, lv_color_hex(g_wifi == WIFI_FAILED ? C_WARN : C_INK), 0);
+  if (g_remote) lv_obj_remove_flag(ui_unsecure_row, LV_OBJ_FLAG_HIDDEN);
+  else lv_obj_add_flag(ui_unsecure_row, LV_OBJ_FLAG_HIDDEN);
+  if (!strncmp(g_tun, "http://", 7)) lv_obj_add_state(ui_unsecure, LV_STATE_CHECKED);
+  else lv_obj_remove_state(ui_unsecure, LV_STATE_CHECKED);
   lv_label_set_text(ui_addr_head, g_remote ? "REMOTE SERVER" : "ADDRESS");
+  lv_obj_set_width(ui_addr, lv_pct(g_remote ? 56 : 100));
+  lv_obj_update_layout(lv_obj_get_parent(ui_addr));
+  lv_obj_align_to(ui_unsecure_row, ui_remote, LV_ALIGN_OUT_BOTTOM_RIGHT, 0, 6);
   lv_obj_set_style_text_font(ui_addr, g_remote ? &lv_font_montserrat_20 : &lv_font_montserrat_28, 0);   // (hosts are long)
   if (g_remote) {   // the server's host; tap it to change the address
     char host[96], prefix[64];
@@ -280,7 +287,7 @@ static void ui_hide_modal() {
 static void ui_connect() {
   if (g_modal_url) {
     if (!tun_set_remote(true, lv_textarea_get_text(ui_ta_ssid))) {
-      lv_label_set_text(ui_msg, "The address must start with https://");
+      lv_label_set_text(ui_msg, "The address must start with http:// or https://");
       lv_obj_set_style_text_color(ui_msg, lv_color_hex(C_WARN), 0);
       return;
     }
@@ -603,6 +610,28 @@ static void ui_setup() {
   lv_obj_set_size(ui_addr, lv_pct(100), 36);   // one line ("..." if it's longer)
   lv_obj_add_flag(ui_addr, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_add_event_cb(ui_addr, [](lv_event_t*) { if (g_remote) ui_show_url_modal(); }, LV_EVENT_CLICKED, nullptr);
+  ui_unsecure_row = lv_obj_create(st);
+  lv_obj_set_size(ui_unsecure_row, 150, 30);
+  lv_obj_add_flag(ui_unsecure_row, LV_OBJ_FLAG_FLOATING);
+  lv_obj_set_style_bg_opa(ui_unsecure_row, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(ui_unsecure_row, 0, 0);
+  lv_obj_set_style_pad_all(ui_unsecure_row, 0, 0);
+  lv_obj_remove_flag(ui_unsecure_row, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_t* ul = ui_label(ui_unsecure_row, "Unsecure", &lv_font_montserrat_16, C_DIM);
+  lv_obj_align(ul, LV_ALIGN_RIGHT_MID, -66, 0);
+  ui_unsecure = lv_switch_create(ui_unsecure_row);
+  lv_obj_set_size(ui_unsecure, 56, 30);
+  lv_obj_align(ui_unsecure, LV_ALIGN_RIGHT_MID, 0, 0);
+  lv_obj_set_style_bg_color(ui_unsecure, lv_color_hex(C_LINE), LV_PART_MAIN);
+  lv_obj_set_style_bg_color(ui_unsecure, lv_color_hex(C_ACCENT), LV_PART_INDICATOR | LV_STATE_CHECKED);
+  lv_obj_set_style_bg_color(ui_unsecure, lv_color_hex(0xffffff), LV_PART_KNOB);
+  lv_obj_add_event_cb(ui_unsecure, [](lv_event_t*) {
+    const char* rest = strstr(g_tun, "://");
+    char addr[sizeof(g_tun)];
+    snprintf(addr, sizeof(addr), "%s://%s", lv_obj_has_state(ui_unsecure, LV_STATE_CHECKED) ? "http" : "https", rest ? rest + 3 : g_tun);
+    tun_set_remote(true, addr);
+    ui_refresh_status();
+  }, LV_EVENT_VALUE_CHANGED, nullptr);
   lv_obj_t* h3 = ui_heading(st, "PC");
   lv_obj_set_style_margin_top(h3, 10, 0);
   lv_obj_t* pc = lv_obj_create(st);   // a dot for the state, and the words
